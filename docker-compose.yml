@@ -1,0 +1,34 @@
+version: "3.8"
+
+# Designed to run on a machine physically on the restaurant's LAN (a mini
+# PC/NUC in the office is enough) so order-to-kitchen flow keeps working
+# even if the internet connection drops. Tablets connect to this machine's
+# local IP, not to a cloud URL. See ARCHITECTURE.md for the reasoning.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: restaurant
+      POSTGRES_PASSWORD: restaurant
+      POSTGRES_DB: restaurant_checker
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql://restaurant:restaurant@db:5432/restaurant_checker?schema=public
+      JWT_SECRET: change-this-to-a-long-random-string-before-any-real-deployment
+      PORT: 4000
+      CORS_ORIGIN: "*"
+    ports:
+      - "4000:4000"
+
+volumes:
+  db_data:

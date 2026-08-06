@@ -1,0 +1,78 @@
+name: CI
+
+# Runs on every push/PR: spins up a real Postgres service (GitHub Actions'
+# hosted runners have full internet access, so this doesn't hit the
+# binaries.prisma.sh-style network restriction we hit building this locally),
+# applies the schema, seeds sample data, boots the backend, and hits its API.
+# Also builds the frontend. This is a build/smoke-test gate, not a full
+# test suite — there's no automated test framework wired in yet (see
+# ARCHITECTURE.md "Known limitations").
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: restaurant
+          POSTGRES_PASSWORD: restaurant
+          POSTGRES_DB: restaurant_checker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://restaurant:restaurant@localhost:5432/restaurant_checker?schema=public
+      JWT_SECRET: ci-test-secret-not-for-prod
+      PORT: 4000
+      CORS_ORIGIN: "*"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install backend deps
+        working-directory: backend
+        run: npm install
+      - name: Apply schema
+        working-directory: backend
+        run: node src/migrate.js
+      - name: Seed sample data
+        working-directory: backend
+        run: node src/seed.js
+      - name: Boot server and smoke-test the API
+        working-directory: backend
+        run: |
+          node src/index.js &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4000/health && break
+            sleep 1
+          done
+          curl -sf http://localhost:4000/health
+          TOKEN=$(curl -sf -X POST http://localhost:4000/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"foh@downtown.example","password":"password123"}' | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).token" < /dev/stdin)
+          curl -sf http://localhost:4000/menu/categories -H "Authorization: Bearer $TOKEN"
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm install
+      - name: Build
+        working-directory: frontend
+        run: npm run build

@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
 import { api } from "../lib/api";
+import { getSocket } from "../lib/socket";
 
-// Front-of-house order entry: pick a table, tap menu items, send to kitchen.
-// This is the screen that replaces "walk to the kitchen and shout the order."
+// Front-of-house screen, two jobs in one place:
+// 1. Send a new order to the kitchen (top half).
+// 2. See which already-sent items are READY and mark them DELIVERED once
+//    carried to the table (bottom half) — this is the step that actually
+//    closes the loop back to the kitchen and lets a table's order be closed.
 export default function OrderEntry() {
   const { user, logout } = useAuth();
   const [categories, setCategories] = useState([]);
@@ -11,11 +15,40 @@ export default function OrderEntry() {
   const [tableId, setTableId] = useState("");
   const [cart, setCart] = useState({}); // menuItemId -> { menuItem, quantity }
   const [status, setStatus] = useState("");
+  const [openOrders, setOpenOrders] = useState([]);
 
   useEffect(() => {
     api.getCategories().then(setCategories).catch((e) => setStatus(e.message));
     api.getTables().then(setTables).catch((e) => setStatus(e.message));
-  }, []);
+    api.getOpenOrders().then(setOpenOrders).catch(console.error);
+
+    const socket = getSocket(user.locationId);
+
+    function handleCreated(order) {
+      setOpenOrders((prev) => [...prev, order]);
+    }
+    function handleItemUpdated({ orderId, item }) {
+      setOpenOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId ? { ...o, items: o.items.map((i) => (i.id === item.id ? item : i)) } : o
+        )
+      );
+    }
+    function handleClosed({ orderId }) {
+      setOpenOrders((prev) => prev.filter((o) => o.id !== orderId));
+    }
+
+    socket.on("order:created", handleCreated);
+    socket.on("order-item:updated", handleItemUpdated);
+    socket.on("order:closed", handleClosed);
+
+    return () => {
+      socket.off("order:created", handleCreated);
+      socket.off("order-item:updated", handleItemUpdated);
+      socket.off("order:closed", handleClosed);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user.locationId]);
 
   function addItem(menuItem) {
     setCart((prev) => {
@@ -53,6 +86,31 @@ export default function OrderEntry() {
       setCart({});
       setTableId("");
       setStatus("Order sent to kitchen.");
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
+  async function markDelivered(orderId, itemId) {
+    try {
+      await api.updateItemStatus(orderId, itemId, "DELIVERED");
+      // Update locally too in case the socket event is delayed.
+      setOpenOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId
+            ? { ...o, items: o.items.map((i) => (i.id === itemId ? { ...i, status: "DELIVERED" } : i)) }
+            : o
+        )
+      );
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
+  async function closeTable(orderId) {
+    try {
+      await api.closeOrder(orderId);
+      setOpenOrders((prev) => prev.filter((o) => o.id !== orderId));
     } catch (e) {
       setStatus(e.message);
     }
@@ -120,6 +178,39 @@ export default function OrderEntry() {
               </button>
             </>
           )}
+        </div>
+
+        <div className="cart-panel" style={{ marginTop: "1.5rem" }}>
+          <h3>Your open tables — deliver &amp; close</h3>
+          {openOrders.length === 0 && <p>No open tables right now.</p>}
+          {openOrders.map((order) => {
+            const allDelivered = order.items.every((i) => i.status === "DELIVERED");
+            return (
+              <div key={order.id} style={{ marginBottom: "1rem", paddingBottom: "1rem", borderBottom: "1px solid #eee" }}>
+                <div style={{ fontWeight: 700, marginBottom: "0.5rem" }}>{order.table.label}</div>
+                {order.items.map((item) => (
+                  <div key={item.id} className="cart-row">
+                    <span>
+                      {item.quantity}x {item.menuItem.name}
+                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <span className={`status-pill status-${item.status}`}>{item.status}</span>
+                      {item.status === "READY" && (
+                        <button onClick={() => markDelivered(order.id, item.id)} style={{ background: "#2563eb", color: "white" }}>
+                          Mark delivered
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {allDelivered && (
+                  <button onClick={() => closeTable(order.id)} style={{ background: "#16a34a", color: "white", marginTop: "0.5rem" }}>
+                    Close table
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

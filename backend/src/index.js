@@ -8,6 +8,7 @@ const authRoutes = require("./routes/auth");
 const menuRoutes = require("./routes/menu");
 const orderRoutes = require("./routes/orders");
 const locationRoutes = require("./routes/locations");
+const publicRoutes = require("./routes/public");
 
 const app = express();
 const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
@@ -21,6 +22,7 @@ app.use("/auth", authRoutes);
 app.use("/menu", menuRoutes);
 app.use("/orders", orderRoutes);
 app.use("/locations", locationRoutes);
+app.use("/public", publicRoutes);
 
 // Centralized error handler so an unhandled exception in a route returns
 // JSON instead of crashing the process or leaking a stack trace to a tablet.

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
 
 export default function Login() {
@@ -40,6 +40,9 @@ export default function Login() {
         <button type="submit" disabled={loading}>
           {loading ? "Signing in..." : "Sign in"}
         </button>
+        <p style={{ textAlign: "center", marginTop: "1rem", fontSize: "0.9rem" }}>
+          New staff member? <Link to="/signup">Create an account</Link>
+        </p>
       </form>
     </div>
   );

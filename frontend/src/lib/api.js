@@ -24,6 +24,8 @@ async function request(path, { method = "GET", body } = {}) {
 
 export const api = {
   login: (email, password) => request("/auth/login", { method: "POST", body: { email, password } }),
+  signup: (data) => request("/auth/signup", { method: "POST", body: data }),
+  getPublicLocations: () => request("/public/locations"),
   getCategories: () => request("/menu/categories"),
   getTables: () => request("/locations/tables"),
   getOpenOrders: () => request("/orders/open"),

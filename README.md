@@ -10,6 +10,18 @@ Read `ARCHITECTURE.md` first — it covers what this does and does not do, and t
 
 Not included yet: inventory, purchasing, finance/tax, HR. See the roadmap table in `ARCHITECTURE.md`.
 
+## Testing on your actual tablet (same wifi as your computer)
+
+This is the fastest way to see it working on real hardware — no hosting, no Docker, just your computer and your tablet on the same wifi network.
+
+1. **Find your computer's local IP address.** Windows: open Command Prompt, run `ipconfig`, look for "IPv4 Address" under your wifi adapter (something like `192.168.1.23`).
+2. **Backend `.env`**: set `CORS_ORIGIN=*` for this test (tightened later for real deployment — see ARCHITECTURE.md).
+3. **Frontend `.env`**: set `VITE_API_URL=http://<your-computer's-IP>:4000` — not `localhost`, because "localhost" on the tablet means the tablet itself, not your computer.
+4. Run both servers as in Quick Start below (`npm run dev` in each folder — the frontend's `--host` flag is already set, which is what lets other devices on the network reach it).
+5. **Windows Firewall**: the first time each server starts, Windows will likely prompt to allow it on private networks — click Allow. If the tablet still can't connect, check Windows Defender Firewall settings for Node.js and allow it on "Private" networks.
+6. On the tablet's browser, go to `http://<your-computer's-IP>:5173`. You should see the login screen.
+7. Try it as two different roles at once: sign in as one seeded account (or sign up a new one) on the tablet, and a different account on your computer's browser at the same URL — actions on one show up live on the other, since both are talking to the same backend.
+
 ## Quick start (local development, one machine)
 
 Requires Node.js 20+ and either a local PostgreSQL install or Docker.
@@ -28,8 +40,8 @@ docker run -d --name restaurant-db -e POSTGRES_USER=restaurant -e POSTGRES_PASSW
 cd backend
 cp .env.example .env      # then edit JWT_SECRET to something random
 npm install
-npx prisma migrate dev --name init
-npm run seed               # creates sample org, 2 locations, menu, tables, staff logins
+npm run migrate             # applies sql/schema.sql — plain SQL, no ORM binary download needed
+npm run seed                # creates sample org, 2 locations, menu, tables, staff logins
 npm run dev                 # starts on http://localhost:4000
 ```
 
@@ -44,9 +56,11 @@ npm install
 npm run dev -- --host       # starts on http://localhost:5173, reachable from other devices on the LAN
 ```
 
-### 4. Log in
+### 4. Log in — or sign up
 
-Sample accounts seeded (password for all: `password123`):
+There's now a self-service signup page at `/signup` (linked from the login screen). It only lets you create **Front-of-house** or **Kitchen** accounts, tied to whichever branch you pick from the list — Coordinator/Admin accounts (full visibility, menu editing) aren't self-service on purpose, see the comment in `backend/src/routes/auth.js` for why.
+
+Or use the sample accounts already seeded (password for all: `password123`):
 
 | Location | Role | Email |
 |---|---|---|
@@ -75,3 +89,14 @@ Open the app on two browser tabs (or two devices) — log in as `foh@downtown.ex
 ## Multi-location note
 
 Each location runs its own local server today (this is the local-network-first design — a location's order flow shouldn't depend on another location's uptime or on the internet). If you want a central view across locations (e.g. an owner dashboard showing all branches), that's a phase-2 addition: either a lightweight sync job pushing closed-order summaries to a central cloud database, or a cloud-hosted reporting layer that reads from each location's Postgres on a schedule. Not built in this release — flag it if it's a near-term priority, since it changes how `docker-compose.yml` and networking should be set up now versus later.
+
+## Version control (GitHub)
+
+A local git repo with an initial commit is already set up in this folder. To push it:
+
+1. Create an empty repo on GitHub (github.com → New repository — don't initialize it with a README/license, this folder already has one).
+2. From this folder: `git remote add origin <the repo URL> && git branch -M main && git push -u origin main`.
+3. `.github/workflows/ci.yml` is already committed — GitHub Actions will pick it up automatically on the first push and run a build/smoke-test on every push and PR (spins up Postgres, applies the schema, seeds data, hits the API, builds the frontend).
+4. Optional: `scripts/create-roadmap-issues.sh` turns the phase 2–5 roadmap into GitHub issues/milestones. Requires the GitHub CLI (`gh auth login` first), and only needs to run once.
+
+**One caution:** this project folder is inside OneDrive. Git and cloud-sync tools (OneDrive, Dropbox, etc.) don't always get along — OneDrive can interfere with git's file locking mid-operation, which is a known source of a corrupted `.git` folder. It worked fine for the initial commit, but if you hit strange git errors later, the fix is usually to move the repo to a non-synced local folder (e.g. `C:\dev\restaurant-checker`) and treat OneDrive purely as a backup of the working files, not as the git working directory.

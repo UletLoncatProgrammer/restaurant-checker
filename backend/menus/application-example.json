@@ -1,0 +1,50 @@
+{
+  "organization": "Application Example Group",
+  "location": {
+    "name": "Application Example",
+    "timezone": "Asia/Jakarta"
+  },
+  "tables": ["Table 1", "Table 2", "Table 3", "Table 4", "Table 5", "Table 6"],
+  "categories": [
+    {
+      "name": "Appetizers",
+      "sortOrder": 1,
+      "items": [
+        { "name": "Sample Spring Rolls", "price": 25000, "taxRate": 0.1 },
+        { "name": "Sample Chicken Wings", "price": 32000, "taxRate": 0.1 },
+        { "name": "Sample Tofu Bites", "price": 20000, "taxRate": 0.1 }
+      ]
+    },
+    {
+      "name": "Mains",
+      "sortOrder": 2,
+      "items": [
+        { "name": "Sample Fried Rice", "price": 47000, "taxRate": 0.1 },
+        { "name": "Sample Chicken Noodle", "price": 35000, "taxRate": 0.1 },
+        { "name": "Sample Grilled Skewers", "price": 40000, "taxRate": 0.1 },
+        { "name": "Sample Fried Chicken", "price": 42000, "taxRate": 0.1 },
+        { "name": "Sample Beef Rendang", "price": 55000, "taxRate": 0.1 },
+        { "name": "Sample Vegetable Stir-fry", "price": 30000, "taxRate": 0.1 }
+      ]
+    },
+    {
+      "name": "Drinks",
+      "sortOrder": 3,
+      "items": [
+        { "name": "Sample Iced Tea", "price": 10000, "taxRate": 0.1 },
+        { "name": "Sample Iced Coffee", "price": 18000, "taxRate": 0.1 },
+        { "name": "Sample Lemon Tea", "price": 12000, "taxRate": 0.1 },
+        { "name": "Sample Fresh Orange Juice", "price": 20000, "taxRate": 0.1 },
+        { "name": "Sample Mineral Water", "price": 8000, "taxRate": 0.1 }
+      ]
+    },
+    {
+      "name": "Desserts",
+      "sortOrder": 4,
+      "items": [
+        { "name": "Sample Banana Fritters", "price": 18000, "taxRate": 0.1 },
+        { "name": "Sample Fruit Pudding", "price": 22000, "taxRate": 0.1 }
+      ]
+    }
+  ]
+}

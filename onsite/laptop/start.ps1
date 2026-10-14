@@ -56,6 +56,8 @@ if ($tsIp) { $sites += "https://$tsIp"; Ok "Tailscale address: $tsIp" }
 $sites += 'https://localhost'
 $s['RC_SITES'] = ($sites -join ' ')
 $s['CORS_ORIGIN'] = ($sites -join ',')
+# certificate for tablets that open the plain Wi-Fi address (they send no name)
+if ($lan) { $s['RC_DEFAULT_SNI'] = $lan.Ip } else { $s['RC_DEFAULT_SNI'] = 'localhost' }
 Write-Settings $s
 
 # ---- build the two local images ----
@@ -177,6 +179,13 @@ if ($lan) {
   }
 }
 if ($made.Count -gt 0) { Set-Content -Path $ProxyIpFile -Value $made -Encoding ASCII }
+# Real end-to-end check, the way a tablet connects (plain address, no name sent).
+if ($lan -and (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+  Start-Sleep -Seconds 2
+  $code = & curl.exe -sk -o NUL -w '%{http_code}' --max-time 8 "https://$($lan.Ip)/health" 2>$null
+  if ("$code" -eq '200') { Ok "A tablet opening https://$($lan.Ip) gets the app" }
+  else { Warn "https://$($lan.Ip) did not answer correctly (code '$code'). Run diagnose.cmd and tell me." }
+}
 
 # ---- certificate (lets tablets trust this laptop's HTTPS) ----
 Say 'Getting the HTTPS certificate for tablets'

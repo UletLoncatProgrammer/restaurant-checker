@@ -1,6 +1,5 @@
 const crypto = require("crypto");
-const { emitToRoles } = require("../socket");
-const { ROLES } = require("./roles");
+const { emitToPerms } = require("../socket");
 
 // Appends to the activity log inside the caller's transaction and returns the
 // event shape the dashboard displays. Call emitActivity() AFTER commit.
@@ -24,7 +23,7 @@ async function logEvent(client, { locationId, orderId = null, type, actorId, mes
 }
 
 function emitActivity(locationId, events) {
-  for (const e of events) emitToRoles(locationId, ROLES.OVERSEE, "activity:new", e);
+  for (const e of events) emitToPerms(locationId, ["DASHBOARD"], "activity:new", e);
 }
 
 module.exports = { logEvent, emitActivity };

@@ -17,6 +17,10 @@ let idc = 0;
 const uid = () => "id-" + ++idc;
 const db = { demo_sessions: [], demo_orders: [], demo_order_items: [], demo_payments: [] };
 const staff = [{ id: "s-owner", name: "Owner", role: "OWNER", pass: "ownerpass12345", must: false, active: true, reset: false, failed: 0 }];
+// v10 billing state (mirrors demo_billing / demo_members)
+const billingRow = { tax_label: "PB1", tax_rate: 0.1, service_rate: 0.05, tax_on_service: true };
+const members = [];
+const phoneKey = (p) => { let d = String(p || "").replace(/[^0-9]/g, ""); if (d.startsWith("62")) d = "0" + d.slice(2); else if (d.startsWith("8")) d = "0" + d; return d; };
 const roles = {
   OWNER: { label: "Owner", views: ["order", "kitchen", "cold", "bar", "pos", "history", "dashboard", "owner"], void: true, pay: true, export: true, builtin: true },
   WAITER: { label: "Waiter", views: ["order", "pos"], void: false, pay: true, export: false, builtin: true },
@@ -247,6 +251,36 @@ function makeClient() {
         const o = staff.find((x) => x.role === "OWNER"); o.pass = a.p_new; o.must = false; Object.keys(tokens).forEach((t) => { if (tokens[t] === o.id) delete tokens[t]; });
         return { data: { ok: true }, error: null };
       }
+      // v10: billing settings + members (mirror demo-v10.sql)
+      if (name === "demo_billing_get") {
+        const me = sByTok(a.p_token); if (!me) return E("Please sign in again");
+        return { data: { tax_label: billingRow.tax_label, tax_percent: billingRow.tax_rate * 100, service_percent: billingRow.service_rate * 100, tax_on_service: billingRow.tax_on_service }, error: null };
+      }
+      if (name === "demo_billing_set") {
+        const [e] = ownerOnly(); if (e) return e;
+        if (a.p_tax_percent < 0 || a.p_tax_percent > 25) return E("Tax must be a percentage from 0 to 25");
+        Object.assign(billingRow, { tax_label: a.p_tax_label.trim(), tax_rate: a.p_tax_percent / 100, service_rate: a.p_service_percent / 100, tax_on_service: !!a.p_tax_on_service });
+        return rpc("demo_billing_get", { p_token: a.p_token });
+      }
+      if (name === "demo_members_list") {
+        const [e] = ownerOnly(); if (e) return e;
+        return { data: members.map((m) => ({ id: m.id, name: m.name, phone: m.phone, discount_percent: m.rate * 100, note: "", active: m.active })), error: null };
+      }
+      if (name === "demo_member_save") {
+        const [e] = ownerOnly(); if (e) return e;
+        const k = phoneKey(a.p_phone); if (!/^[0-9]{6,15}$/.test(k)) return E("Phone number: 6 to 15 digits");
+        if (!(a.p_discount_percent > 0 && a.p_discount_percent <= 100)) return E("Discount must be a percentage above 0 and at most 100");
+        if (members.some((m) => m.key === k && m.id !== a.p_id)) return E("A member with that phone number already exists");
+        let m = a.p_id ? members.find((x) => x.id === a.p_id) : null;
+        if (!m) { m = { id: uid(), active: true }; members.push(m); }
+        Object.assign(m, { name: a.p_name.trim(), phone: a.p_phone.trim(), key: k, rate: a.p_discount_percent / 100, active: a.p_active == null ? m.active : a.p_active });
+        return { data: { id: m.id, name: m.name }, error: null };
+      }
+      if (name === "demo_member_lookup") {
+        const me = sByTok(a.p_token); if (!me) return E("Please sign in again"); if (!roles[me.role].pay) return E("Not allowed: your role cannot take payment");
+        const m = members.find((x) => x.key === phoneKey(a.p_phone) && x.active); if (!m) return E("No active member with that phone number");
+        return { data: { id: m.id, name: m.name, discount_percent: m.rate * 100 }, error: null };
+      }
       if (name === "demo_pay_order") {
         const me = sByTok(a.p_token); if (!me) return E("Please sign in again"); if (me.must) return E("Set your new password first"); if (!roles[me.role].pay) return E("Not allowed: your role cannot take payment");
         const o = db.demo_orders.find((x) => x.id === a.p_order_id);
@@ -256,9 +290,13 @@ function makeClient() {
         const items = db.demo_order_items.filter((i) => i.order_id === o.id && i.status !== "CANCELLED");
         if (!items.length) return E("Nothing to charge - every item was voided");
         if (items.some((i) => i.status !== "DELIVERED")) return E("Not all items are delivered yet");
-        const sub = items.reduce((s, i) => s + i.qty * i.unit_price, 0), tax = items.reduce((s, i) => s + Math.round(i.qty * i.unit_price * i.tax_rate), 0);
-        if (a.p_method === "CASH" && (a.p_tendered == null || a.p_tendered < sub + tax)) return E("Cash received is less than the total");
-        const pay = { id: uid(), session_id: o.session_id, order_id: o.id, receipt_no: ++receiptSeq, table_name: o.table_name, customer_name: o.customer_name || null, subtotal: sub, tax, total: sub + tax, method: a.p_method, amount_tendered: a.p_method === "CASH" ? a.p_tendered : null, change_given: a.p_method === "CASH" ? a.p_tendered - sub - tax : null, status: "PAID", paid_at: now(), voided_at: null, void_reason: null, paid_by: me.name, voided_by: null };
+        let mem = null; if (a.p_member) { mem = members.find((x) => x.id === a.p_member && x.active); if (!mem) return E("Member not found (or switched off)"); }
+        const sub = items.reduce((s, i) => s + i.qty * i.unit_price, 0);
+        const disc = Math.round(sub * (mem ? mem.rate : 0)), after = sub - disc, svc = Math.round(after * billingRow.service_rate);
+        const tax = Math.round((after + (billingRow.tax_on_service ? svc : 0)) * billingRow.tax_rate), total = after + svc + tax;
+        if (a.p_method === "CASH" && (a.p_tendered == null || a.p_tendered < total)) return E("Cash received is less than the total");
+        const pay = { id: uid(), session_id: o.session_id, order_id: o.id, receipt_no: ++receiptSeq, table_name: o.table_name, customer_name: o.customer_name || null, subtotal: sub, discount: disc, service: svc, tax, total, method: a.p_method, amount_tendered: a.p_method === "CASH" ? a.p_tendered : null, change_given: a.p_method === "CASH" ? a.p_tendered - total : null, status: "PAID", paid_at: now(), voided_at: null, void_reason: null, paid_by: me.name, voided_by: null,
+          member_id: mem ? mem.id : null, member_name: mem ? mem.name : null, discount_rate: mem ? mem.rate : 0, service_rate: billingRow.service_rate, tax_rate: billingRow.tax_rate, tax_label: billingRow.tax_label };
         db.demo_payments.push(pay); o.status = "CLOSED"; o.closed_at = now(); changed();
         return { data: Object.assign({}, pay), error: null };
       }
@@ -435,15 +473,16 @@ const URLX = "https://clearion.test/application-example-group/index.html";
   assert($(A, "#view-pos").classList.contains("active"), "switched to POS");
   const posText = text(A, "#posDetail");
   assert(/Rp 67\.000/.test(posText), "subtotal 2x10000+47000=67000: " + posText);
-  assert(/Rp 6\.700/.test(posText), "tax 6700");
-  assert(/Rp 73\.700/.test(posText), "total 73700");
+  assert(/Service charge \(5%\)/.test(posText) && /Rp 3\.350/.test(posText), "service 5% = 3350: " + posText);
+  assert(/PB1 \(10%\)/.test(posText) && /Rp 7\.035/.test(posText), "PB1 10% of 70350 = 7035");
+  assert(/Rp 77\.385/.test(posText), "total 77385");
   assert($(A, "#posCharge").disabled, "cash charge disabled until cash entered");
   const cash = $(A, "#posCash"); cash.value = "50000"; cash.dispatchEvent(new A.Event("input", { bubbles: true }));
-  assert($(A, "#posCharge").disabled && /Short by Rp 23\.700/.test(text(A, "#posChange")), "short cash blocked");
+  assert($(A, "#posCharge").disabled && /Short by Rp 27\.385/.test(text(A, "#posChange")), "short cash blocked");
   cash.value = "100000"; cash.dispatchEvent(new A.Event("input", { bubbles: true }));
-  assert(!$(A, "#posCharge").disabled && /Change: Rp 26\.300/.test(text(A, "#posChange")), "change shown");
+  assert(!$(A, "#posCharge").disabled && /Change: Rp 22\.615/.test(text(A, "#posChange")), "change shown");
   click($(A, "#posCharge")); await sleep(150);
-  assert(/Receipt #1/.test(text(A, "#posDetail")) && /Rp 73\.700/.test(text(A, "#posDetail")), "receipt shown");
+  assert(/Receipt #1/.test(text(A, "#posDetail")) && /Rp 77\.385/.test(text(A, "#posDetail")) && /Service charge/.test(text(A, "#posDetail")), "receipt shown with service");
   click($(A, "#rcPrint")); assert(A.__printed, "print called");
   click($(A, "#rcDone"));
 
@@ -455,7 +494,7 @@ const URLX = "https://clearion.test/application-example-group/index.html";
   assert($$(C, ".dash-tab").find((b) => b.dataset.dtab === "report" && !b.hidden), "coordinator has the Excel tab");
   click($$(D, ".dash-tab").find((b) => b.dataset.dtab === "tx")); await sleep(20);
   await sleep(80);
-  assert(/Table 1/.test(text(D, "#txTable")) && /Rp 73\.700/.test(text(D, "#txStats")), "transaction listed, gross 73700");
+  assert(/Table 1/.test(text(D, "#txTable")) && /Rp 77\.385/.test(text(D, "#txStats")), "transaction listed, gross 77385");
   click($(D, ".void-sale"));
   $(D, "#modalInput").value = "ab"; $(D, "#modalInput").dispatchEvent(new D.Event("input", { bubbles: true }));
   assert($(D, "#modalOk").disabled, "reason needs 3+ chars");
@@ -480,9 +519,36 @@ const URLX = "https://clearion.test/application-example-group/index.html";
   await advTo(K, "PREPARING"); await advTo(K, "READY");
   click($(A, ".deliver")); await sleep(100);
   click($(A, ".pay-table")); await sleep(50);
+  // v10: the owner adds a member; the waiter finds her by phone (another format) and her discount applies
+  assert.strictEqual($(O, "#blLabel").value, "PB1", "owner sees the tax settings");
+  $(O, "#mbName").value = "Sari"; $(O, "#mbPhone").value = "+62 812 3456 789"; $(O, "#mbDisc").value = "10";
+  click($(O, "#mbAdd")); await sleep(60);
+  assert(/Sari/.test(text(O, "#mbTable")), "member listed in the owner console: " + text(O, "#mbTable"));
+  // v10.1: at the POS, the owner adds a new member right where the phone was not found
+  click($(O, '.tab-btn[data-view="pos"]')); await sleep(40);
+  click($$(O, ".pos-table").find((x) => /Table 3/.test(x.textContent))); await sleep(30);
+  const oph = $(O, "#posPhone"); oph.value = "0877 1111 222"; oph.dispatchEvent(new O.Event("input", { bubbles: true }));
+  click($(O, "#posMemberFind")); await sleep(40);
+  assert($(O, "#posNewAdd"), "owner gets 'Add member & apply' when the phone is not found: " + text(O, "#posDetail"));
+  const onm = $(O, "#posNewName"); onm.value = "Budi"; onm.dispatchEvent(new O.Event("input", { bubbles: true }));
+  const ond = $(O, "#posNewDisc"); ond.value = "15"; ond.dispatchEvent(new O.Event("input", { bubbles: true }));
+  click($(O, "#posNewAdd")); await sleep(80);
+  assert(/Member discount — Budi \(15%\)/.test(text(O, "#posDetail")), "new member applied to the bill: " + text(O, "#posDetail"));
+  assert(/Budi/.test(text(O, "#mbTable")), "new member also in the owner's member list");
+  click($(O, "#posMemberRemove")); await sleep(20);
+  click($(O, '.tab-btn[data-view="owner"]')); await sleep(20);
+  const ph = $(A, "#posPhone"); ph.value = "0899 000 000"; ph.dispatchEvent(new A.Event("input", { bubbles: true }));
+  click($(A, "#posMemberFind")); await sleep(40);
+  assert(/No active member/.test(text(A, "#posDetail")), "unknown phone: message");
+  assert(/Only the owner can add members/.test(text(A, "#posDetail")) && !$(A, "#posNewAdd"), "a waiter is told who can add members, no add form");
+  const ph2 = $(A, "#posPhone"); ph2.value = "0812-3456-789"; ph2.dispatchEvent(new A.Event("input", { bubbles: true }));
+  click($(A, "#posMemberFind")); await sleep(40);
+  assert(/Member discount — Sari \(10%\)/.test(text(A, "#posDetail")) && /Rp 36\.383/.test(text(A, "#posDetail")), "member discount previewed: " + text(A, "#posDetail"));
   click($$(A, ".pos-method").find((b) => b.dataset.m === "CARD")); await sleep(20);
   click($(A, "#posCharge")); await sleep(150);
-  assert(/Receipt #2/.test(text(A, "#posDetail")) && /Rp 38\.500/.test(text(A, "#posDetail")), "second receipt 35000+3500");
+  // 35000 - 3500 = 31500; service 5% = 1575; PB1 10% of 33075 = 3308 (3307.5); total 36383
+  assert(/Receipt #2/.test(text(A, "#posDetail")) && /Rp 36\.383/.test(text(A, "#posDetail")) && /Member discount — Sari/.test(text(A, "#posDetail")), "second receipt with member discount");
+  assert.strictEqual(db.demo_payments[1].member_name, "Sari");
 
   click($$(C, ".dash-tab").find((b) => b.dataset.dtab === "report"));
   click($(C, "#repBtn")); await sleep(30);
@@ -491,10 +557,10 @@ const URLX = "https://clearion.test/application-example-group/index.html";
   assert.deepStrictEqual(Object.keys(wb.sheets), ["Summary", "Sales by day", "Sales by item", "Transactions", "Stock", "Voids"]);
   const sum = Object.fromEntries(wb.sheets["Summary"].filter((r) => r.length >= 2 && typeof r[1] === "number").map((r) => [r[0], r[1]]));
   assert.strictEqual(sum["Paid sales (count)"], 1, "one paid sale");
-  assert.strictEqual(sum["Gross sales (incl. tax)"], 38500);
-  assert.strictEqual(sum["Net sales (before tax)"] + sum["Tax"], sum["Gross sales (incl. tax)"]);
+  assert.strictEqual(sum["Gross sales (what customers paid)"], 36383);
+  assert.strictEqual(sum["Food & drinks (before discount)"] + sum["Member discounts"] + sum["Service charge"] + sum["Tax (PBJT)"], sum["Gross sales (what customers paid)"]);
   assert.strictEqual(sum["Paid sales voided (count)"], 1);
-  assert.strictEqual(sum["Paid sales voided (value)"], 73700);
+  assert.strictEqual(sum["Paid sales voided (value)"], 77385);
   const items = wb.sheets["Sales by item"]; assert.strictEqual(items[1][0], "Sample Chicken Noodle"); assert.strictEqual(items[1][2], 35000);
   assert.strictEqual(items[items.length - 1][2], 35000, "item net total reconciles to payments net");
   const stock = Object.fromEntries(wb.sheets["Stock"].slice(1).map((r) => [r[0], r]));

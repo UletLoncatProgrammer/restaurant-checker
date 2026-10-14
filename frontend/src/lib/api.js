@@ -79,29 +79,44 @@ export const api = {
   updateUser: (id, data) => request(`/users/${id}`, { method: "PATCH", body: data }),
   getRoles: () => request("/users/roles"),
   setRoleEnabled: (role, enabled) => request(`/users/roles/${role}`, { method: "PATCH", body: { enabled } }),
+  getPermissions: () => request("/users/permissions"),
+  createRole: (label, permissions) => request("/users/roles", { method: "POST", body: { label, permissions } }),
+  updateRole: (key, data) => request(`/users/roles/${key}`, { method: "PATCH", body: data }),
+  deleteRole: (key) => request(`/users/roles/${key}`, { method: "DELETE" }),
   resetPassword: (id) => request(`/users/${id}/reset-password`, { method: "POST" }),
   // menu + tables (ADMIN / COORDINATOR)
   createCategory: (name) => request("/menu/categories", { method: "POST", body: { name } }),
   deleteCategory: (id) => request(`/menu/categories/${id}`, { method: "DELETE" }),
+  updateCategory: (id, data) => request(`/menu/categories/${id}`, { method: "PATCH", body: data }),
   createMenuItem: (data) => request("/menu/items", { method: "POST", body: data }),
   updateMenuItem: (id, data) => request(`/menu/items/${id}`, { method: "PATCH", body: data }),
   createTable: (label) => request("/locations/tables", { method: "POST", body: { label } }),
   updateTable: (id, data) => request(`/locations/tables/${id}`, { method: "PATCH", body: data }),
-  getCategories: () => request("/menu/categories"),
+  // all=true (menu editors): also switched-off dishes, so they can be switched back on
+  getCategories: (all = false) => request(`/menu/categories${all ? "?all=1" : ""}`),
   getTables: () => request("/locations/tables"),
   getSettings: () => request("/locations/settings"),
   updateSettings: (data) => request("/locations/settings", { method: "PATCH", body: data }),
   getOpenOrders: () => request("/orders/open"),
   getOutstandingSummary: () => request("/orders/outstanding-summary"),
-  createOrder: (tableId, items) => request("/orders", { method: "POST", body: { tableId, items } }),
+  // items: [{ menuItemId, quantity, notes?, spice? }]; customer: { name, phone } (both optional)
+  createOrder: (tableId, items, customer = {}) =>
+    request("/orders", { method: "POST", body: { tableId, items, customerName: customer.name || undefined, customerPhone: customer.phone || undefined } }),
+  getHistory: (date, station = "ALL") => request(`/orders/history?${new URLSearchParams({ station, ...(date ? { date } : {}) })}`),
   updateItemStatus: (orderId, itemId, status) =>
     request(`/orders/${orderId}/items/${itemId}`, { method: "PATCH", body: { status } }),
   voidItem: (orderId, itemId, reason) =>
     request(`/orders/${orderId}/items/${itemId}/void`, { method: "POST", body: { reason } }),
   voidOrder: (orderId, reason) => request(`/orders/${orderId}/void`, { method: "POST", body: { reason } }),
-  getBill: (orderId) => request(`/payments/bill/${orderId}`),
-  pay: (orderId, method, amountTendered) =>
-    request("/payments", { method: "POST", body: { orderId, method, amountTendered } }),
+  // memberId (optional): the member whose discount applies
+  getBill: (orderId, memberId) => request(`/payments/bill/${orderId}${memberId ? `?memberId=${encodeURIComponent(memberId)}` : ""}`),
+  pay: (orderId, method, amountTendered, memberId) =>
+    request("/payments", { method: "POST", body: { orderId, method, amountTendered, memberId: memberId || undefined } }),
+  // members (discounts)
+  lookupMember: (phone) => request(`/members/lookup?phone=${encodeURIComponent(phone)}`),
+  getMembers: (q = "") => request(`/members${q ? `?q=${encodeURIComponent(q)}` : ""}`),
+  createMember: (data) => request("/members", { method: "POST", body: data }),
+  updateMember: (id, data) => request(`/members/${id}`, { method: "PATCH", body: data }),
   getReceipt: (paymentId) => request(`/payments/${paymentId}/receipt`),
   getTransactions: (date) => request(`/transactions${date ? `?date=${date}` : ""}`),
   getActivity: () => request("/transactions/activity?limit=100"),

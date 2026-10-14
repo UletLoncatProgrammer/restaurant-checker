@@ -9,7 +9,8 @@ const n = (v) => Number(v);
 //  - Sales = payments with status PAID whose paid_at falls in the window
 //    (location-local calendar). Sales later voided are excluded and listed
 //    on the Voids/Transactions sheets instead.
-//  - Net = pre-tax subtotal; Tax = per-line rounded tax; Gross = Net + Tax.
+//  - Net = food & drinks before discount; Discount = member discounts; Service = service charge;
+//    Tax = restaurant tax (PBJT) on the bill; Gross = Net - Discount + Service + Tax (what customers paid).
 //  - Stock "Sold" = units deducted when an order was sent (not when paid);
 //    voids of not-yet-started items are returned via "Void restock".
 async function getReportData(locationId, win) {
@@ -21,6 +22,8 @@ async function getReportData(locationId, win) {
   const { rows: sum } = await query(
     `SELECT COUNT(*) FILTER (WHERE status = 'PAID') AS sales_count,
             COALESCE(SUM(subtotal) FILTER (WHERE status = 'PAID'), 0) AS net,
+            COALESCE(SUM(discount) FILTER (WHERE status = 'PAID'), 0) AS discount,
+            COALESCE(SUM(service) FILTER (WHERE status = 'PAID'), 0) AS service,
             COALESCE(SUM(tax) FILTER (WHERE status = 'PAID'), 0) AS tax,
             COALESCE(SUM(total) FILTER (WHERE status = 'PAID'), 0) AS gross,
             COUNT(*) FILTER (WHERE status = 'VOIDED') AS voided_sales_count,
@@ -38,7 +41,8 @@ async function getReportData(locationId, win) {
   const { rows: byDay } = await query(
     `SELECT to_char(d.day, 'YYYY-MM-DD') AS day,
             COUNT(p.id) AS sales_count,
-            COALESCE(SUM(p.subtotal), 0) AS net, COALESCE(SUM(p.tax), 0) AS tax, COALESCE(SUM(p.total), 0) AS gross
+            COALESCE(SUM(p.subtotal), 0) AS net, COALESCE(SUM(p.discount), 0) AS discount, COALESCE(SUM(p.service), 0) AS service,
+            COALESCE(SUM(p.tax), 0) AS tax, COALESCE(SUM(p.total), 0) AS gross
      FROM generate_series($4::date, $5::date - 1, interval '1 day') AS d(day)
      LEFT JOIN payments p ON p.location_id = $1 AND p.status = 'PAID'
           AND p.paid_at >= $2 AND p.paid_at < $3
@@ -50,8 +54,7 @@ async function getReportData(locationId, win) {
   const { rows: byItem } = await query(
     `SELECT mi.name, COALESCE(c.name, '') AS category,
             SUM(oi.quantity) AS qty,
-            SUM(oi.quantity * oi.unit_price) AS net,
-            SUM(ROUND(oi.quantity * oi.unit_price * oi.tax_rate, 0)) AS tax
+            SUM(oi.quantity * oi.unit_price) AS net
      FROM order_items oi
      JOIN payments p ON p.order_id = oi.order_id AND p.status = 'PAID'
      JOIN menu_items mi ON mi.id = oi.menu_item_id
@@ -63,7 +66,8 @@ async function getReportData(locationId, win) {
 
   const { rows: txns } = await query(
     `SELECT p.receipt_no, to_char(p.paid_at AT TIME ZONE $4, 'YYYY-MM-DD HH24:MI:SS') AS paid_local,
-            t.label AS table_label, u.name AS cashier, p.method, p.subtotal, p.tax, p.total, p.status,
+            t.label AS table_label, u.name AS cashier, p.method, p.subtotal, p.discount, p.service, COALESCE(p.member_name, '') AS member_name,
+            p.tax, p.total, p.status,
             COALESCE(p.void_reason, '') AS void_reason, COALESCE(vu.name, '') AS voided_by,
             COALESCE((SELECT string_agg(oi.quantity || 'x ' || mi.name, ', ' ORDER BY oi.created_at, oi.id)
                         FROM order_items oi JOIN menu_items mi ON mi.id = oi.menu_item_id
@@ -114,17 +118,20 @@ async function getReportData(locationId, win) {
     summary: {
       salesCount: n(sum[0].sales_count),
       net: n(sum[0].net),
+      discount: n(sum[0].discount),
+      service: n(sum[0].service),
       tax: n(sum[0].tax),
       gross: n(sum[0].gross),
       voidedSalesCount: n(sum[0].voided_sales_count),
       voidedSalesTotal: n(sum[0].voided_sales_total),
     },
     byMethod: byMethod.map((r) => ({ method: r.method, count: n(r.count), gross: n(r.gross) })),
-    byDay: byDay.map((r) => ({ day: r.day, salesCount: n(r.sales_count), net: n(r.net), tax: n(r.tax), gross: n(r.gross) })),
-    byItem: byItem.map((r) => ({ name: r.name, category: r.category, qty: n(r.qty), net: n(r.net), tax: n(r.tax) })),
+    byDay: byDay.map((r) => ({ day: r.day, salesCount: n(r.sales_count), net: n(r.net), discount: n(r.discount), service: n(r.service), tax: n(r.tax), gross: n(r.gross) })),
+    byItem: byItem.map((r) => ({ name: r.name, category: r.category, qty: n(r.qty), net: n(r.net) })),
     transactions: txns.map((r) => ({
       receiptNo: String(r.receipt_no), paidLocal: r.paid_local, table: r.table_label, cashier: r.cashier,
-      method: r.method, subtotal: n(r.subtotal), tax: n(r.tax), total: n(r.total), status: r.status,
+      method: r.method, subtotal: n(r.subtotal), discount: n(r.discount), member: r.member_name, service: n(r.service),
+      tax: n(r.tax), total: n(r.total), status: r.status,
       items: r.items, voidReason: r.void_reason, voidedBy: r.voided_by,
     })),
     stock: stock.map((r) => ({

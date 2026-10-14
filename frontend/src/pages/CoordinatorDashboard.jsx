@@ -8,8 +8,13 @@ import { useAlerts } from "../hooks/useAlerts";
 import Topbar from "../components/Topbar.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
 import ReasonDialog from "../components/ReasonDialog.jsx";
+import LineExtras from "../components/LineExtras.jsx";
+import { useSettings } from "../hooks/useSettings";
+import { stationName } from "../lib/stations";
+import { can } from "../lib/permissions";
 
-const TABS = ["Live", "Transactions", "Activity", "Stock", "Report"];
+// Each tab and the permission it needs.
+const TABS = [["Live", "DASHBOARD"], ["Transactions", "DASHBOARD"], ["Kitchen history", "HISTORY"], ["Activity", "DASHBOARD"], ["Stock", "DASHBOARD"], ["Report", "EXPORT"]];
 
 // One dashboard for the three oversight roles; what you can DO depends on role:
 //   COORDINATOR  see everything, download the Excel report, receive stock
@@ -18,9 +23,9 @@ const TABS = ["Live", "Transactions", "Activity", "Stock", "Report"];
 // The server enforces every one of these; hiding a button is only convenience.
 export default function CoordinatorDashboard() {
   const { user } = useAuth();
-  const canVoid = ["SUPERVISOR", "ADMIN"].includes(user.role);
-  const canExport = ["COORDINATOR", "ADMIN"].includes(user.role);
-  const [tab, setTab] = useState("Live");
+  const canVoid = can(user, "VOID");
+  const visibleTabs = TABS.filter(([, perm]) => can(user, perm)).map(([t]) => t);
+  const [tab, setTab] = useState(visibleTabs[0] || "Live");
   const [voidTarget, setVoidTarget] = useState(null); // { kind, orderId, itemId?, label }
   const { alerts, push, dismiss } = useAlerts();
 
@@ -45,11 +50,10 @@ export default function CoordinatorDashboard() {
     reload();
   }
 
-  const visibleTabs = TABS.filter((t) => (t === "Report" ? canExport : true));
 
   return (
     <div>
-      <Topbar title={user.role === "SUPERVISOR" ? "Supervisor" : "Coordinator Dashboard"} />
+      <Topbar title="Dashboard" />
       <AlertBanner alerts={alerts} onDismiss={dismiss} />
       <div className="container">
         <div className="tabs" role="tablist">
@@ -125,9 +129,10 @@ export default function CoordinatorDashboard() {
         )}
 
         {tab === "Transactions" && <Transactions user={user} canVoid={canVoid} onVoid={setVoidTarget} />}
+        {tab === "Kitchen history" && <KitchenHistory />}
         {tab === "Activity" && <Activity />}
         {tab === "Stock" && <Stock />}
-        {tab === "Report" && canExport && <Report />}
+        {tab === "Report" && can(user, "EXPORT") && <Report />}
       </div>
 
       {voidTarget && (
@@ -172,7 +177,9 @@ function Transactions({ canVoid, onVoid }) {
         <>
           <div className="stat-row">
             <Stat label="Paid sales" value={data.totals.paidCount} />
-            <Stat label="Net" value={rp(data.totals.subtotal)} />
+            <Stat label="Food & drinks" value={rp(data.totals.subtotal)} />
+            <Stat label="Member discounts" value={rp(data.totals.discount || 0)} />
+            <Stat label="Service" value={rp(data.totals.service || 0)} />
             <Stat label="Tax" value={rp(data.totals.tax)} />
             <Stat label="Gross" value={rp(data.totals.total)} strong />
             <Stat label="Voided" value={`${data.totals.voidedCount} (${rp(data.totals.voidedTotal)})`} />
@@ -187,7 +194,7 @@ function Transactions({ canVoid, onVoid }) {
                   <td>{p.receiptNo}</td>
                   <td>{new Date(p.paidAt).toLocaleTimeString()}</td>
                   <td>{p.tableLabel}</td>
-                  <td>{p.items}</td>
+                  <td>{p.items}{p.memberName ? <div className="stock-note">Member {p.memberName}: −{rp(p.discount)}</div> : null}</td>
                   <td>{p.method}</td>
                   <td>{rp(p.total)}</td>
                   <td>{p.cashier}</td>
@@ -205,6 +212,84 @@ function Transactions({ canVoid, onVoid }) {
                 </tr>
               ))}
               {data.payments.length === 0 && <tr><td colSpan={9}>No transactions on this day.</td></tr>}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Every dish the kitchen and bar finished on a day: when it was ordered, how long it
+// took, who made it and who served it. Dishes leave the kitchen screens once READY;
+// this is where supervisors trace them afterwards.
+function KitchenHistory() {
+  const { kitchenMode } = useSettings();
+  const [date, setDate] = useState("");
+  const [station, setStation] = useState("ALL");
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    api.getHistory(date || undefined, station).then((d) => { setData(d); setError(""); }).catch((e) => setError(e.message));
+  }, [date, station]);
+
+  useEffect(() => {
+    load();
+    const socket = getSocket();
+    socket.on("order-item:updated", load); // a dish marked ready / served appears straight away
+    return () => socket.off("order-item:updated", load);
+  }, [load]);
+
+  const choices = [
+    ["ALL", "All"],
+    ["KITCHEN", kitchenMode === "SPLIT" ? "Hot kitchen" : "Kitchen"],
+    ...(kitchenMode === "SPLIT" ? [["COLD", "Cold kitchen"]] : []),
+    ["BAR", "Bar"],
+  ];
+  const time = (t) => (t ? new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
+
+  return (
+    <div className="panel">
+      <div className="toolbar">
+        <h2 style={{ margin: 0 }}>Kitchen &amp; bar history</h2>
+        <label>
+          Date{" "}
+          <input type="date" value={date || data?.date || ""} onChange={(e) => setDate(e.target.value)} />
+        </label>
+      </div>
+      <div className="tabs">
+        {choices.map(([value, label]) => (
+          <button key={value} className={`small ${station === value ? "primary" : ""}`} onClick={() => setStation(value)}>{label}</button>
+        ))}
+      </div>
+      {error && <p className="error-text">{error}</p>}
+      {data && (
+        <>
+          <div className="stat-row">
+            <Stat label="Dishes finished" value={data.stats.lines} />
+            <Stat label="Portions" value={data.stats.units} />
+            <Stat label="Average time to make" value={data.stats.avgMinutes === null ? "—" : `${data.stats.avgMinutes} min`} />
+            <Stat label="Waiting to be served" value={data.stats.waitingToServe} strong={data.stats.waitingToServe > 0} />
+          </div>
+          <table>
+            <thead>
+              <tr><th>Ready at</th><th>Table</th><th>Dish</th><th>Made in</th><th>Ordered</th><th>Took</th><th>Made by</th><th>Served</th></tr>
+            </thead>
+            <tbody>
+              {data.lines.map((l) => (
+                <tr key={l.id}>
+                  <td>{time(l.readyAt)}</td>
+                  <td>{l.table}{l.customerName ? ` · ${l.customerName}` : ""}</td>
+                  <td>{l.quantity}x {l.item}<LineExtras item={l} /></td>
+                  <td>{stationName(l.station)}</td>
+                  <td>{time(l.orderedAt)}</td>
+                  <td>{l.minutes} min</td>
+                  <td>{l.readyBy || "—"}</td>
+                  <td>{l.status === "DELIVERED" ? `${time(l.deliveredAt)} · ${l.deliveredBy || "—"}` : <strong style={{ color: "#b45309" }}>Waiting to be served</strong>}</td>
+                </tr>
+              ))}
+              {data.lines.length === 0 && <tr><td colSpan={8}>Nothing was finished on this day.</td></tr>}
             </tbody>
           </table>
         </>
@@ -288,7 +373,7 @@ function Stock() {
             {items.map((i) => (
               <tr key={i.menuItemId}><td>{i.name}</td><td className={i.onHand <= 5 ? "outstanding-count" : ""}>{i.onHand}</td></tr>
             ))}
-            {items.length === 0 && <tr><td colSpan={2}>No items have stock tracking turned on.</td></tr>}
+            {items.length === 0 && <tr><td colSpan={2}>No dish is counted yet. Tick "Count stock" for a dish in Admin &gt; Menu, then add its first delivery here.</td></tr>}
           </tbody>
         </table>
       </div>

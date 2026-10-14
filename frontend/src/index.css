@@ -343,3 +343,16 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .chip { background: #e5e7eb; border-radius: 999px; padding: 0.2rem 0.4rem 0.2rem 0.8rem; }
 .choice { display: flex; gap: 0.6rem; align-items: flex-start; margin: 0.6rem 0; cursor: pointer; }
 .choice input { min-height: auto; margin-top: 0.3rem; }
+.cart-line { border-bottom: 1px solid #f0f0f0; padding-bottom: 0.4rem; margin-bottom: 0.4rem; }
+.cart-extras { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.cart-extras input, .cart-extras select { flex: 1 1 160px; min-height: 38px; font-size: 0.9rem; }
+.spice-tag { display: inline-block; font-style: normal; font-weight: 700; font-size: 0.75rem; padding: 0 0.4rem; margin-right: 0.35rem; border-radius: 999px; background: #e5e7eb; color: #374151; }
+.spice-tag.spicy { background: #fee2e2; color: #b91c1c; }
+tr.switched-off td { opacity: 0.5; }
+tr.switched-off td:last-child { opacity: 1; }
+.role-editor { background: #f9fafb; border-radius: 8px; padding: 0.75rem 1rem; margin: 0.75rem 0; }
+.role-editor input[type="text"], .role-editor input:not([type]) { width: 100%; margin-bottom: 0.5rem; }
+.member-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-top: 0.75rem; }
+.member-row input { flex: 1 1 180px; }
+
+.hint { color: #64748b; font-size: 0.9em; margin: 6px 0; }

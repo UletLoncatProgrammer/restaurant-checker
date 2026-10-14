@@ -1,12 +1,11 @@
 const Router = require("../lib/asyncRouter");
 const { query } = require("../db");
-const { requireAuth, requireRole } = require("../middleware/auth");
-const { ROLES } = require("../lib/roles");
+const { requireAuth, requirePerm } = require("../middleware/auth");
 const { resolvePeriod } = require("../lib/period");
 
 const router = Router();
 router.use(requireAuth);
-router.use(requireRole(...ROLES.OVERSEE));
+router.use(requirePerm("DASHBOARD"));
 
 // GET /transactions?date=YYYY-MM-DD — every payment (paid and voided) taken
 // that local day, with who/what/how much, plus totals.
@@ -15,7 +14,7 @@ router.get("/", async (req, res) => {
   if (d.error) return res.status(400).json({ error: d.error });
 
   const { rows } = await query(
-    `SELECT p.id, p.receipt_no, p.order_id, p.paid_at, p.method, p.subtotal, p.tax, p.total, p.status,
+    `SELECT p.id, p.receipt_no, p.order_id, p.paid_at, p.method, p.subtotal, p.discount, p.service, p.member_name, p.tax, p.total, p.status,
             p.void_reason, p.voided_at, t.label AS table_label, u.name AS cashier, vu.name AS voided_by,
             (SELECT string_agg(oi.quantity || 'x ' || mi.name, ', ' ORDER BY oi.created_at, oi.id)
                FROM order_items oi JOIN menu_items mi ON mi.id = oi.menu_item_id
@@ -38,6 +37,9 @@ router.get("/", async (req, res) => {
     cashier: r.cashier,
     method: r.method,
     subtotal: Number(r.subtotal),
+    discount: Number(r.discount),
+    memberName: r.member_name || null,
+    service: Number(r.service),
     tax: Number(r.tax),
     total: Number(r.total),
     status: r.status,
@@ -49,6 +51,8 @@ router.get("/", async (req, res) => {
   const { rows: t } = await query(
     `SELECT COUNT(*) FILTER (WHERE status = 'PAID') AS paid_count,
             COALESCE(SUM(subtotal) FILTER (WHERE status = 'PAID'), 0) AS subtotal,
+            COALESCE(SUM(discount) FILTER (WHERE status = 'PAID'), 0) AS discount,
+            COALESCE(SUM(service) FILTER (WHERE status = 'PAID'), 0) AS service,
             COALESCE(SUM(tax) FILTER (WHERE status = 'PAID'), 0) AS tax,
             COALESCE(SUM(total) FILTER (WHERE status = 'PAID'), 0) AS total,
             COUNT(*) FILTER (WHERE status = 'VOIDED') AS voided_count,
@@ -62,6 +66,8 @@ router.get("/", async (req, res) => {
     totals: {
       paidCount: Number(t[0].paid_count),
       subtotal: Number(t[0].subtotal),
+      discount: Number(t[0].discount),
+      service: Number(t[0].service),
       tax: Number(t[0].tax),
       total: Number(t[0].total),
       voidedCount: Number(t[0].voided_count),

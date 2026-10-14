@@ -10,6 +10,7 @@ import { useSettings } from "../hooks/useSettings";
 import { boardStations, boardTitle, stationOf } from "../lib/stations";
 import Topbar from "../components/Topbar.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
+import LineExtras from "../components/LineExtras.jsx";
 
 const NEXT_STATUS = {
   PENDING: "PREPARING",
@@ -114,14 +115,14 @@ export default function KitchenDisplay({ board = "kitchen" }) {
           {tickets.map(({ order, lines }) => (
             <div key={order.id} className="ticket">
               <div className="ticket-header">
-                <span>{order.table.label}</span>
+                <span>{order.table.label}{order.customer?.name ? ` · ${order.customer.name}` : ""}</span>
                 <span>{new Date(order.openedAt).toLocaleTimeString()}</span>
               </div>
               {lines.map((item) => (
                 <div key={item.id} className={`ticket-item ${item.status === "CANCELLED" ? "voided" : ""}`}>
                   <span>
                     {item.quantity}x {item.menuItem.name}
-                    {item.notes && <em style={{ display: "block", fontSize: "0.8rem" }}>{item.notes}</em>}
+                    <LineExtras item={item} />
                     {item.status === "CANCELLED" && <em style={{ display: "block", fontSize: "0.8rem" }}>VOIDED — do not make</em>}
                   </span>
                   <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>

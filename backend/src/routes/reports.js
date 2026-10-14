@@ -1,13 +1,12 @@
 const Router = require("../lib/asyncRouter");
-const { requireAuth, requireRole } = require("../middleware/auth");
-const { ROLES } = require("../lib/roles");
+const { requireAuth, requirePerm } = require("../middleware/auth");
 const { resolvePeriod } = require("../lib/period");
 const { getReportData } = require("../lib/reportData");
 const { buildWorkbook } = require("../lib/reportWorkbook");
 
 const router = Router();
 router.use(requireAuth);
-router.use(requireRole(...ROLES.EXPORT));
+router.use(requirePerm("EXPORT"));
 
 // GET /reports/export?period=day|week&date=YYYY-MM-DD
 // One .xlsx with sales + stock (+ transactions and voids). `date` defaults to

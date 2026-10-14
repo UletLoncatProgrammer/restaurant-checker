@@ -13,6 +13,7 @@ const bcrypt = require("bcryptjs");
 const { pool } = require("./db");
 const { passwordProblem } = require("./lib/password");
 
+// Built-in roles only; the company's own roles are given in Admin > Staff.
 const ROLES = ["ADMIN", "COORDINATOR", "SUPERVISOR", "FOH", "KITCHEN"];
 
 function arg(name) {

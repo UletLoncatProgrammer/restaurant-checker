@@ -31,7 +31,7 @@ export function useSettings() {
       socket.off("settings:updated", publish);
     };
   }, []);
-  return settings || { kitchenMode: "ONE" };
+  return settings || { kitchenMode: "ONE", billing: null };
 }
 
 export { publish as setSettingsForTests };

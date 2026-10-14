@@ -50,9 +50,11 @@ async function buildWorkbook(data, generatedAt = new Date()) {
   put("", "", "");
   put("SALES", "", "", { bold: true });
   put("Paid sales (count)", data.summary.salesCount, "");
-  put("Net sales (before tax)", data.summary.net, "");
-  put("Tax", data.summary.tax, "");
-  put("Gross sales (incl. tax)", data.summary.gross, "", { bold: true });
+  put("Food & drinks (before discount)", data.summary.net, "");
+  put("Member discounts", -data.summary.discount, "");
+  put("Service charge", data.summary.service, "");
+  put("Tax (PBJT)", data.summary.tax, "");
+  put("Gross sales (what customers paid)", data.summary.gross, "", { bold: true });
   put("", "", "");
   put("By payment method", "Count", "Gross", { bold: true });
   for (const m of data.byMethod) put(m.method, m.count, m.gross);
@@ -66,7 +68,8 @@ async function buildWorkbook(data, generatedAt = new Date()) {
   for (const note of [
     "Sales = payments marked PAID with paid_at in the period; sales voided later are excluded here and shown on Transactions/Voids.",
     "This report reflects the data at the time it was generated; re-running an old period after a later void will show different numbers.",
-    "Prices are treated as tax-exclusive; tax is rounded per line to whole currency units.",
+    "Bill = food & drinks - member discount + service charge + tax; each rounded to whole currency units. Rates are those in force when each bill was paid.",
+    "Sales by item are before member discount, service charge and tax.",
     "Stock covers only menu items with stock tracking on. 'Sold' = units deducted when the order was sent.",
   ]) put(note, "", "");
 
@@ -77,11 +80,18 @@ async function buildWorkbook(data, generatedAt = new Date()) {
       { header: "Date", key: "day", width: 14 },
       { header: "Sales (count)", key: "salesCount", width: 14 },
       { header: "Net", key: "net", money: true },
+      { header: "Discount", key: "discount", money: true },
+      { header: "Service", key: "service", money: true },
       { header: "Tax", key: "tax", money: true },
       { header: "Gross", key: "gross", money: true },
     ],
     data.byDay,
-    { totals: { day: "TOTAL", salesCount: sum(data.byDay, "salesCount"), net: sum(data.byDay, "net"), tax: sum(data.byDay, "tax"), gross: sum(data.byDay, "gross") } }
+    {
+      totals: {
+        day: "TOTAL", salesCount: sum(data.byDay, "salesCount"), net: sum(data.byDay, "net"), discount: sum(data.byDay, "discount"),
+        service: sum(data.byDay, "service"), tax: sum(data.byDay, "tax"), gross: sum(data.byDay, "gross"),
+      },
+    }
   );
 
   // ---- Sales by item
@@ -91,11 +101,10 @@ async function buildWorkbook(data, generatedAt = new Date()) {
       { header: "Item", key: "name", width: 32 },
       { header: "Category", key: "category", width: 18 },
       { header: "Qty sold", key: "qty", width: 12 },
-      { header: "Net", key: "net", money: true },
-      { header: "Tax", key: "tax", money: true },
+      { header: "Net (before discount)", key: "net", money: true, width: 20 },
     ],
     data.byItem,
-    { totals: { name: "TOTAL", qty: sum(data.byItem, "qty"), net: sum(data.byItem, "net"), tax: sum(data.byItem, "tax") } }
+    { totals: { name: "TOTAL", qty: sum(data.byItem, "qty"), net: sum(data.byItem, "net") } }
   );
 
   // ---- Transactions
@@ -108,6 +117,9 @@ async function buildWorkbook(data, generatedAt = new Date()) {
       { header: "Cashier", key: "cashier", width: 20 },
       { header: "Method", key: "method", width: 10 },
       { header: "Subtotal", key: "subtotal", money: true },
+      { header: "Member", key: "member", width: 18 },
+      { header: "Discount", key: "discount", money: true },
+      { header: "Service", key: "service", money: true },
       { header: "Tax", key: "tax", money: true },
       { header: "Total", key: "total", money: true },
       { header: "Status", key: "status", width: 10 },

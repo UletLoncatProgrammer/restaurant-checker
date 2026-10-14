@@ -3,10 +3,14 @@
 // another branch (the v1 `join-location` event let anyone subscribe to any
 // location by guessing an id; that is removed).
 //
-// Rooms:  location:<id>            every staff screen at the branch
-//         location:<id>:<ROLE>     role-scoped, used for money/audit events
-//                                  that kitchen/floor tablets should not see.
+// Rooms:  location:<id>                 every staff screen at the branch
+//         location:<id>:perm:<PERM>     screens whose role has that permission, used for
+//                                       money/audit events kitchen tablets should not see
+//         location:<id>:phone|nophone   who may see customers' phone numbers
+//         location:<id>:role:<KEY>      to sign out everyone of a role whose permissions changed
+//         user:<id>                     one person's screens
 const { authenticateToken } = require("./middleware/auth");
+const { seesPhone } = require("./lib/permissions");
 
 let io = null;
 
@@ -34,9 +38,11 @@ function initSocket(server, corsOrigin) {
   });
 
   io.on("connection", (socket) => {
-    const { sub, locationId, role } = socket.data.user;
+    const { sub, locationId, role, permissions } = socket.data.user;
     socket.join(`location:${locationId}`);
-    socket.join(`location:${locationId}:${role}`);
+    socket.join(`location:${locationId}:role:${role}`);
+    for (const p of permissions) socket.join(`location:${locationId}:perm:${p}`);
+    socket.join(`location:${locationId}:${seesPhone(permissions) ? "phone" : "nophone"}`);
     socket.join(`user:${sub}`);
   });
 
@@ -54,11 +60,24 @@ function emitToLocation(locationId, event, payload) {
   io.to(`location:${locationId}`).emit(event, payload);
 }
 
-// Emit only to sockets whose role is in `roles` (e.g. payment totals go to
-// coordinators/supervisors/admins, not to the kitchen display).
-function emitToRoles(locationId, roles, event, payload) {
+// Emit only to screens whose role has one of `perms` (e.g. payment totals go to
+// the dashboard, not to the kitchen display). A screen in several rooms gets it once.
+function emitToPerms(locationId, perms, event, payload) {
   if (!io) return;
-  io.to(roles.map((r) => `location:${locationId}:${r}`)).emit(event, payload);
+  io.to(perms.map((p) => `location:${locationId}:perm:${p}`)).emit(event, payload);
 }
 
-module.exports = { initSocket, disconnectUser, emitToLocation, emitToRoles };
+// An order event: full to screens that may see phone numbers, without the phone to the rest.
+function emitOrderEvent(locationId, event, full, stripped) {
+  if (!io) return;
+  io.to(`location:${locationId}:phone`).emit(event, full);
+  io.to(`location:${locationId}:nophone`).emit(event, stripped);
+}
+
+// A role's permissions changed: its people reconnect and get the new rooms.
+function disconnectRole(locationId, roleKey) {
+  if (!io) return;
+  io.in(`location:${locationId}:role:${roleKey}`).disconnectSockets(true);
+}
+
+module.exports = { initSocket, disconnectUser, disconnectRole, emitToLocation, emitToPerms, emitOrderEvent };

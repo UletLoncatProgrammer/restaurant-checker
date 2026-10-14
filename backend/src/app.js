@@ -17,6 +17,7 @@ const paymentRoutes = require("./routes/payments");
 const transactionRoutes = require("./routes/transactions");
 const stockRoutes = require("./routes/stock");
 const reportRoutes = require("./routes/reports");
+const memberRoutes = require("./routes/members");
 
 // "*" only ever reaches here outside production (config.js refuses it there).
 const corsOrigin = config.corsOrigins.includes("*") ? "*" : config.corsOrigins;
@@ -64,6 +65,7 @@ function createApp() {
   app.use("/transactions", transactionRoutes);
   app.use("/stock", stockRoutes);
   app.use("/reports", reportRoutes);
+  app.use("/members", memberRoutes);
   app.use("/locations", locationRoutes);
   app.use("/public", publicRoutes);
 
@@ -82,7 +84,7 @@ function createApp() {
       })
     );
     // Single-page-app fallback for browser navigations only; API paths still get a JSON 404.
-    app.get(/^\/(?!auth\/|users|menu\/|orders|payments|transactions|stock|reports|locations|public\/|health|socket\.io).*/, (req, res) =>
+    app.get(/^\/(?!auth\/|users|menu\/|orders|payments|transactions|stock|reports|locations|members|public\/|health|socket\.io).*/, (req, res) =>
       res.sendFile(path.join(publicDir, "index.html"))
     );
   }

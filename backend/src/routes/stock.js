@@ -1,14 +1,13 @@
 const Router = require("../lib/asyncRouter");
 const { query, withTransaction } = require("../db");
-const { requireAuth, requireRole } = require("../middleware/auth");
+const { requireAuth, requirePerm } = require("../middleware/auth");
 const { HttpError } = require("../lib/http");
-const { ROLES } = require("../lib/roles");
 const { logEvent, emitActivity } = require("../lib/events");
 const { onHandMap, addMovement, emitStock } = require("../lib/stock");
 
 const router = Router();
 router.use(requireAuth);
-router.use(requireRole(...ROLES.OVERSEE));
+router.use(requirePerm("DASHBOARD"));
 
 // GET /stock — tracked menu items and current on-hand.
 router.get("/", async (req, res) => {

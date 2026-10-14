@@ -8,21 +8,36 @@ import Connect from "./pages/Connect.jsx";
 import ChangePassword from "./pages/ChangePassword.jsx";
 import Admin from "./pages/Admin.jsx";
 import { needsServer } from "./lib/server";
+import { canAny, homePath } from "./lib/permissions";
 import OrderEntry from "./pages/OrderEntry.jsx";
 import KitchenDisplay from "./pages/KitchenDisplay.jsx";
 import CoordinatorDashboard from "./pages/CoordinatorDashboard.jsx";
 import Pos from "./pages/Pos.jsx";
 
-// Every screen here is role-gated, not just hidden by navigation — a
-// kitchen tablet loading the FOH screen by mistake should bounce, not
+// Every screen here is permission-gated, not just hidden by navigation — a
+// kitchen tablet loading the order screen by mistake should bounce, not
 // silently show the wrong UI. (The API enforces the same rules server-side.)
-function RequireRole({ roles, children }) {
+// `perms`: the person needs at least one of these permissions.
+function RequirePerm({ perms, children }) {
   const { user, mustChangePassword } = useAuth();
   if (needsServer()) return <Navigate to="/connect" replace />;
   if (!user) return <Navigate to="/login" replace />;
   if (mustChangePassword) return <Navigate to="/change-password" replace />;
-  if (!roles.includes(user.role)) return <Navigate to="/" replace />;
+  if (!canAny(user, perms)) return <Navigate to="/" replace />;
   return children;
+}
+
+function NoAccess() {
+  const { logout } = useAuth();
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <h1>No screens yet</h1>
+        <p>Your role does not include any screen. Ask your manager to tick what you need in Admin &gt; Roles.</p>
+        <button onClick={logout}>Log out</button>
+      </div>
+    </div>
+  );
 }
 
 function RequireUser({ children }) {
@@ -36,9 +51,7 @@ function Home() {
   if (needsServer()) return <Navigate to="/connect" replace />;
   if (!user) return <Navigate to="/login" replace />;
   if (mustChangePassword) return <Navigate to="/change-password" replace />;
-  if (user.role === "FOH") return <Navigate to="/order-entry" replace />;
-  if (user.role === "KITCHEN") return <Navigate to="/kitchen" replace />;
-  return <Navigate to="/dashboard" replace />;
+  return <Navigate to={homePath(user)} replace />;
 }
 
 // Disables the right-click / long-press context menu and image/text dragging
@@ -85,59 +98,60 @@ export default function App() {
         <Route
           path="/admin"
           element={
-            <RequireRole roles={["COORDINATOR", "ADMIN"]}>
+            <RequirePerm perms={["MENU", "STAFF", "MEMBERS"]}>
               <Admin />
-            </RequireRole>
+            </RequirePerm>
           }
         />
+        <Route path="/no-access" element={<RequireUser><NoAccess /></RequireUser>} />
         <Route path="*" element={<Navigate to="/" replace />} />
         <Route path="/" element={<Home />} />
         <Route
           path="/order-entry"
           element={
-            <RequireRole roles={["FOH", "COORDINATOR", "SUPERVISOR", "ADMIN"]}>
+            <RequirePerm perms={["ORDER"]}>
               <OrderEntry />
-            </RequireRole>
+            </RequirePerm>
           }
         />
         <Route
           path="/pos"
           element={
-            <RequireRole roles={["FOH", "COORDINATOR", "SUPERVISOR", "ADMIN"]}>
+            <RequirePerm perms={["PAY"]}>
               <Pos />
-            </RequireRole>
+            </RequirePerm>
           }
         />
         <Route
           path="/kitchen"
           element={
-            <RequireRole roles={["KITCHEN", "COORDINATOR", "SUPERVISOR", "ADMIN"]}>
+            <RequirePerm perms={["BOARD_KITCHEN", "BOARD_COLD"]}>
               <KitchenDisplay board="kitchen" key="kitchen" />
-            </RequireRole>
+            </RequirePerm>
           }
         />
         <Route
           path="/kitchen/cold"
           element={
-            <RequireRole roles={["KITCHEN", "COORDINATOR", "SUPERVISOR", "ADMIN"]}>
+            <RequirePerm perms={["BOARD_COLD"]}>
               <KitchenDisplay board="cold" key="cold" />
-            </RequireRole>
+            </RequirePerm>
           }
         />
         <Route
           path="/bar"
           element={
-            <RequireRole roles={["KITCHEN", "COORDINATOR", "SUPERVISOR", "ADMIN"]}>
+            <RequirePerm perms={["BOARD_BAR"]}>
               <KitchenDisplay board="bar" key="bar" />
-            </RequireRole>
+            </RequirePerm>
           }
         />
         <Route
           path="/dashboard"
           element={
-            <RequireRole roles={["COORDINATOR", "SUPERVISOR", "ADMIN"]}>
+            <RequirePerm perms={["DASHBOARD", "HISTORY", "EXPORT"]}>
               <CoordinatorDashboard />
-            </RequireRole>
+            </RequirePerm>
           }
         />
       </Routes>

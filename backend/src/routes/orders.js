@@ -2,12 +2,42 @@ const crypto = require("crypto");
 const Router = require("../lib/asyncRouter");
 const { query, withTransaction } = require("../db");
 const { requireAuth } = require("../middleware/auth");
-const { emitToLocation, emitToRoles } = require("../socket");
+const { emitToLocation, emitToPerms, emitOrderEvent } = require("../socket");
 const { HttpError } = require("../lib/http");
-const { ROLES } = require("../lib/roles");
+const { can } = require("../lib/permissions");
 const { logEvent, emitActivity } = require("../lib/events");
 const { onHandMap, addMovement, emitStock } = require("../lib/stock");
-const { getOpenOrders, getOrder } = require("../lib/orderShape");
+const { getOpenOrders, getOrder, forUser, withoutPhone } = require("../lib/orderShape");
+const { resolvePeriod } = require("../lib/period");
+
+// Sends an order event to every screen of the branch; kitchen-only screens get it without the phone number.
+function emitOrder(locationId, event, payload) {
+  const stripped = payload.order ? { ...payload, order: withoutPhone(payload.order) } : withoutPhone(payload);
+  emitOrderEvent(locationId, event, payload, stripped);
+}
+
+// Which permission lets someone start / finish a dish of a station. In one-kitchen
+// mode the cold dishes are on the hot kitchen screen, so either board may do them.
+function boardPermsFor(station, kitchenMode) {
+  if (station === "BAR") return ["BOARD_BAR"];
+  if (station === "COLD") return kitchenMode === "SPLIT" ? ["BOARD_COLD"] : ["BOARD_COLD", "BOARD_KITCHEN"];
+  return ["BOARD_KITCHEN"];
+}
+const needs = (user, perms, what) => {
+  if (!perms.some((p) => can(user, p))) throw new HttpError(403, `Not allowed to ${what} (needs permission ${perms.join(" or ")})`);
+};
+
+// Optional customer details typed by the waiter. Empty = not given.
+function cleanCustomer(body) {
+  const name = typeof body.customerName === "string" ? body.customerName.trim() : "";
+  const phone = typeof body.customerPhone === "string" ? body.customerPhone.trim() : "";
+  if (body.customerName !== undefined && body.customerName !== null && typeof body.customerName !== "string") throw new HttpError(400, "customerName must be text");
+  if (body.customerPhone !== undefined && body.customerPhone !== null && typeof body.customerPhone !== "string") throw new HttpError(400, "customerPhone must be text");
+  if (name.length > 60) throw new HttpError(400, "Customer name must be 60 characters or fewer");
+  if (phone && !/^[0-9+()\- ]{4,30}$/.test(phone)) throw new HttpError(400, "Phone number: digits, spaces, + - ( ) only, 4 to 30 characters");
+  return { name: name || null, phone: phone || null };
+}
+const SPICES = ["SPICY", "NOT_SPICY"];
 
 const router = Router();
 router.use(requireAuth);
@@ -34,7 +64,64 @@ async function lockOrder(client, locationId, orderId) {
 
 // GET /orders/open — every open order + items for this location.
 router.get("/open", async (req, res) => {
-  res.json(await getOpenOrders({ query }, req.user.locationId));
+  const orders = await getOpenOrders({ query }, req.user.locationId);
+  res.json(orders.map((o) => forUser(o, req.user)));
+});
+
+// GET /orders/history?date=YYYY-MM-DD&station=ALL|KITCHEN|COLD|BAR
+// Every dish the kitchen/bar finished (marked READY) on that day in the branch's
+// time zone: who made it, how long it took, and who served it. For supervisors and up.
+router.get("/history", async (req, res) => {
+  needs(req.user, ["HISTORY"], "see the kitchen history");
+  const station = (req.query.station || "ALL").toUpperCase();
+  if (!["ALL", "KITCHEN", "COLD", "BAR"].includes(station)) throw new HttpError(400, "station must be ALL, KITCHEN, COLD or BAR");
+  const day = await resolvePeriod(req.user.locationId, "day", req.query.date);
+  if (day.error) throw new HttpError(400, day.error);
+  const { rows } = await query(
+    `SELECT oi.id, oi.quantity, oi.notes, oi.spice, oi.station, oi.status, oi.created_at, oi.ready_at, oi.delivered_at,
+            mi.name AS item_name, t.label AS table_label, o.customer_name,
+            ru.name AS ready_by, du.name AS delivered_by
+     FROM order_items oi
+     JOIN orders o ON o.id = oi.order_id
+     JOIN menu_items mi ON mi.id = oi.menu_item_id
+     JOIN restaurant_tables t ON t.id = o.table_id
+     LEFT JOIN users ru ON ru.id = oi.ready_by_id
+     LEFT JOIN users du ON du.id = oi.delivered_by_id
+     WHERE o.location_id = $1 AND oi.ready_at >= $2 AND oi.ready_at < $3
+       AND oi.status IN ('READY', 'DELIVERED') AND ($4 = 'ALL' OR oi.station = $4)
+     ORDER BY oi.ready_at DESC
+     LIMIT 2000`,
+    [req.user.locationId, day.start, day.end, station]
+  );
+  const lines = rows.map((r) => ({
+    id: r.id,
+    table: r.table_label,
+    customerName: r.customer_name,
+    item: r.item_name,
+    quantity: Number(r.quantity),
+    notes: r.notes,
+    spice: r.spice,
+    station: r.station,
+    status: r.status,
+    orderedAt: r.created_at,
+    readyAt: r.ready_at,
+    minutes: Math.max(0, Math.round((new Date(r.ready_at) - new Date(r.created_at)) / 60000)),
+    readyBy: r.ready_by,
+    deliveredAt: r.delivered_at,
+    deliveredBy: r.delivered_by,
+  }));
+  const avg = lines.length ? Math.round(lines.reduce((s, l) => s + l.minutes, 0) / lines.length) : null;
+  res.json({
+    date: day.startDate,
+    station,
+    stats: {
+      lines: lines.length,
+      units: lines.reduce((s, l) => s + l.quantity, 0),
+      avgMinutes: avg,
+      waitingToServe: lines.filter((l) => l.status === "READY").length,
+    },
+    lines,
+  });
 });
 
 // GET /orders/outstanding-summary — per-menu-item ordered vs delivered,
@@ -67,10 +154,9 @@ router.get("/outstanding-summary", async (req, res) => {
 // (its running bill), the dishes are added to it; otherwise a new order is opened.
 // Response: the full order plus "added": true when it went onto an existing bill.
 router.post("/", async (req, res) => {
-  if (!ROLES.TAKE_ORDER.includes(req.user.role)) {
-    return res.status(403).json({ error: `Requires ${ROLES.TAKE_ORDER.join(", ")}` });
-  }
+  needs(req.user, ["ORDER"], "take orders");
   const { tableId, items } = req.body || {};
+  const customer = cleanCustomer(req.body || {});
   if (typeof tableId !== "string" || !tableId || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "tableId and a non-empty items[] are required" });
   }
@@ -85,6 +171,9 @@ router.post("/", async (req, res) => {
     }
     if (i.notes !== undefined && i.notes !== null && (typeof i.notes !== "string" || i.notes.length > 200)) {
       return res.status(400).json({ error: "notes must be text of 200 characters or fewer" });
+    }
+    if (i.spice !== undefined && i.spice !== null && !SPICES.includes(i.spice)) {
+      return res.status(400).json({ error: "spice must be SPICY or NOT_SPICY" });
     }
   }
 
@@ -109,6 +198,7 @@ router.post("/", async (req, res) => {
     const byId = new Map(menuItems.map((m) => [m.id, m]));
     for (const i of items) {
       if (!byId.has(i.menuItemId)) throw new HttpError(400, `Unknown or inactive menuItemId ${i.menuItemId} for this location`);
+      if (i.spice && !byId.get(i.menuItemId).spice_option) throw new HttpError(400, `${byId.get(i.menuItemId).name} has no spice choice`);
     }
 
     const demand = new Map();
@@ -131,8 +221,14 @@ router.post("/", async (req, res) => {
     const orderId = isNew ? crypto.randomUUID() : openRows[0].id;
     if (isNew) {
       await client.query(
-        "INSERT INTO orders (id, location_id, table_id, opened_by_id) VALUES ($1, $2, $3, $4)",
-        [orderId, locationId, tableId, req.user.sub]
+        "INSERT INTO orders (id, location_id, table_id, opened_by_id, customer_name, customer_phone) VALUES ($1, $2, $3, $4, $5, $6)",
+        [orderId, locationId, tableId, req.user.sub, customer.name, customer.phone]
+      );
+    } else if (customer.name || customer.phone) {
+      // a later round may add (or correct) the customer's details; empty fields keep what was there
+      await client.query(
+        "UPDATE orders SET customer_name = COALESCE($2, customer_name), customer_phone = COALESCE($3, customer_phone) WHERE id = $1",
+        [orderId, customer.name, customer.phone]
       );
     }
     const newItemIds = [];
@@ -144,9 +240,9 @@ router.post("/", async (req, res) => {
         // clock_timestamp() (not now()) so lines keep the order they were sent
         // in: now() is identical for every statement in a transaction.
         // station is copied from the dish so the ticket stays on its screen even if the menu changes later
-        `INSERT INTO order_items (id, order_id, menu_item_id, quantity, unit_price, tax_rate, notes, station, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp(), clock_timestamp())`,
-        [orderItemId, orderId, m.id, qty, m.price, m.tax_rate, i.notes ? i.notes.trim() : null, m.station]
+        `INSERT INTO order_items (id, order_id, menu_item_id, quantity, unit_price, tax_rate, notes, station, spice, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp(), clock_timestamp())`,
+        [orderItemId, orderId, m.id, qty, m.price, m.tax_rate, i.notes && i.notes.trim() ? i.notes.trim() : null, m.station, i.spice || null]
       );
       newItemIds.push(orderItemId);
       if (m.track_stock) {
@@ -170,9 +266,9 @@ router.post("/", async (req, res) => {
 
   if (added) {
     // screens replace their copy of this order and ring only for the new lines
-    emitToLocation(locationId, "order:items-added", { order, addedItemIds: addedIds, addedById: req.user.sub });
+    emitOrder(locationId, "order:items-added", { order, addedItemIds: addedIds, addedById: req.user.sub });
   } else {
-    emitToLocation(locationId, "order:created", order);
+    emitOrder(locationId, "order:created", order);
   }
   emitActivity(locationId, activity);
   await emitStock(locationId, stockIds);
@@ -182,9 +278,9 @@ router.post("/", async (req, res) => {
 // Legal item moves. The only way to CANCEL an item is the supervisor void
 // endpoints below — a plain PATCH can no longer cancel or move backwards.
 const TRANSITIONS = {
-  PENDING: { to: "PREPARING", roles: ROLES.KITCHEN_STATUS },
-  PREPARING: { to: "READY", roles: ROLES.KITCHEN_STATUS },
-  READY: { to: "DELIVERED", roles: ROLES.DELIVER },
+  PENDING: { to: "PREPARING", by: "board" },   // the station's screen
+  PREPARING: { to: "READY", by: "board" },
+  READY: { to: "DELIVERED", by: "ORDER" },     // the waiter who carries it
 };
 
 // PATCH /orders/:orderId/items/:itemId — advance one item's status.
@@ -208,11 +304,23 @@ router.patch("/:orderId/items/:itemId", async (req, res) => {
     if (!rule || rule.to !== status) {
       throw new HttpError(409, `Cannot move an item from ${item.status} to ${status}`);
     }
-    if (!rule.roles.includes(req.user.role)) {
-      throw new HttpError(403, `Requires ${rule.roles.join(", ")} to mark ${status}`);
+    if (rule.by === "board") {
+      const { rows: loc } = await client.query("SELECT kitchen_mode FROM locations WHERE id = $1", [locationId]);
+      needs(req.user, boardPermsFor(item.station, loc[0].kitchen_mode), `mark ${status}`);
+    } else {
+      needs(req.user, [rule.by], `mark ${status}`);
     }
 
-    await client.query("UPDATE order_items SET status = $1, updated_at = now() WHERE id = $2", [status, itemId]);
+    // remember who finished / served the dish and when (kitchen history)
+    await client.query(
+      `UPDATE order_items SET status = $1::order_item_status, updated_at = now(),
+              ready_at = CASE WHEN $1::order_item_status = 'READY' THEN now() ELSE ready_at END,
+              ready_by_id = CASE WHEN $1::order_item_status = 'READY' THEN $3 ELSE ready_by_id END,
+              delivered_at = CASE WHEN $1::order_item_status = 'DELIVERED' THEN now() ELSE delivered_at END,
+              delivered_by_id = CASE WHEN $1::order_item_status = 'DELIVERED' THEN $3 ELSE delivered_by_id END
+       WHERE id = $2`,
+      [status, itemId, req.user.sub]
+    );
     const { rows: nameRows } = await client.query("SELECT name FROM menu_items WHERE id = $1", [item.menu_item_id]);
     const ev = await logEvent(client, {
       locationId, orderId, type: "ITEM_STATUS", actorId: req.user.sub,
@@ -242,9 +350,7 @@ router.patch("/:orderId/items/:itemId", async (req, res) => {
 // Restocks only if the kitchen had not started it (PENDING); food already
 // being cooked is waste, not stock.
 router.post("/:orderId/items/:itemId/void", async (req, res) => {
-  if (!ROLES.VOID.includes(req.user.role)) {
-    return res.status(403).json({ error: `Only ${ROLES.VOID.join(" or ")} can void` });
-  }
+  needs(req.user, ["VOID"], "void");
   const reason = cleanReason(req.body && req.body.reason);
   const { orderId, itemId } = req.params;
   const locationId = req.user.locationId;
@@ -320,9 +426,7 @@ router.post("/:orderId/items/:itemId/void", async (req, res) => {
 // an OPEN order (everything not yet voided is cancelled) or an already-PAID
 // order (the payment is marked VOIDED and drops out of sales).
 router.post("/:orderId/void", async (req, res) => {
-  if (!ROLES.VOID.includes(req.user.role)) {
-    return res.status(403).json({ error: `Only ${ROLES.VOID.join(" or ")} can void` });
-  }
+  needs(req.user, ["VOID"], "void");
   const reason = cleanReason(req.body && req.body.reason);
   const { orderId } = req.params;
   const locationId = req.user.locationId;
@@ -381,7 +485,7 @@ router.post("/:orderId/void", async (req, res) => {
   });
 
   emitToLocation(locationId, "order:voided", { orderId, wasPaid: out.wasPaid, tableLabel: out.tableLabel });
-  emitToRoles(locationId, ROLES.OVERSEE, "payment:changed", { orderId });
+  emitToPerms(locationId, ["DASHBOARD"], "payment:changed", { orderId });
   emitActivity(locationId, out.events);
   await emitStock(locationId, out.stockIds);
   res.json({ orderId, voided: true, wasPaid: out.wasPaid });

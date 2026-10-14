@@ -10,6 +10,8 @@ import { useAlerts } from "../hooks/useAlerts";
 import { useWakeLock } from "../hooks/useWakeLock";
 import Topbar from "../components/Topbar.jsx";
 import AlertBanner from "../components/AlertBanner.jsx";
+import LineExtras from "../components/LineExtras.jsx";
+import { can } from "../lib/permissions";
 
 // Front-of-house screen:
 // 1. Send dishes to the kitchen/bar. A table has ONE running bill: sending again
@@ -25,17 +27,20 @@ export default function OrderEntry() {
   const [categories, setCategories] = useState([]);
   const [tables, setTables] = useState([]);
   const [tableId, setTableId] = useState("");
-  const [cart, setCart] = useState({}); // menuItemId -> { menuItem, quantity }
+  // Cart lines: the same dish can appear twice with different notes or spice.
+  //   { key, menuItem, quantity, notes, spice, hint }   (hint = the category's note hint)
+  const [cart, setCart] = useState([]);
+  const [customer, setCustomer] = useState({ name: "", phone: "" });
   const [status, setStatus] = useState("");
 
   const { orders } = useLiveOrders(user, {
     onItemUpdated: ({ orderOpenedById, tableLabel, item }) => {
       if (item.status !== "READY") return;
-      // A waiter hears their OWN tables only; coordinators/supervisors/admins
-      // hear everything (they cover the floor). Everyone still sees the order
+      // A waiter hears their OWN tables only; people with the dashboard (they
+      // cover the whole floor) hear everything. Everyone still sees the order
       // status change on screen.
       const mine = orderOpenedById === user.id;
-      if (user.role !== "FOH" || mine) {
+      if (can(user, "DASHBOARD") || mine) {
         playSound("ready");
         push(`Ready to serve — ${tableLabel}: ${item.quantity}x ${item.menuItem.name}`, "ready");
       }
@@ -63,33 +68,32 @@ export default function OrderEntry() {
     return () => socket.off("stock:updated", onStock);
   }, []);
 
-  function addItem(menuItem) {
+  // Tapping a dish adds 1 to its plain line (no note, no spice), or starts a new line.
+  function addItem(menuItem, hint) {
     setCart((prev) => {
-      const quantity = (prev[menuItem.id]?.quantity || 0) + 1;
-      return { ...prev, [menuItem.id]: { menuItem, quantity } };
+      const plain = prev.find((l) => l.menuItem.id === menuItem.id && !l.notes && !l.spice);
+      if (plain) return prev.map((l) => (l === plain ? { ...l, quantity: l.quantity + 1 } : l));
+      return [...prev, { key: `${menuItem.id}-${Date.now()}-${prev.length}`, menuItem, quantity: 1, notes: "", spice: "", hint }];
     });
   }
-
-  function changeQty(menuItemId, delta) {
-    setCart((prev) => {
-      const existing = prev[menuItemId];
-      if (!existing) return prev;
-      const quantity = existing.quantity + delta;
-      if (quantity <= 0) {
-        const { [menuItemId]: _removed, ...rest } = prev;
-        return rest;
-      }
-      return { ...prev, [menuItemId]: { ...existing, quantity } };
-    });
+  const updateLine = (key, change) => setCart((prev) => prev.map((l) => (l.key === key ? { ...l, ...change } : l)));
+  function changeQty(key, delta) {
+    setCart((prev) => prev.map((l) => (l.key === key ? { ...l, quantity: l.quantity + delta } : l)).filter((l) => l.quantity > 0));
   }
 
   async function sendOrder() {
     if (!tableId) return setStatus("Pick a table first.");
-    const items = Object.entries(cart).map(([menuItemId, { quantity }]) => ({ menuItemId, quantity }));
+    const items = cart.map((l) => ({
+      menuItemId: l.menuItem.id,
+      quantity: l.quantity,
+      ...(l.notes.trim() ? { notes: l.notes.trim() } : {}),
+      ...(l.spice ? { spice: l.spice } : {}),
+    }));
     if (items.length === 0) return setStatus("Add at least one item.");
     try {
-      const order = await api.createOrder(tableId, items);
-      setCart({});
+      const order = await api.createOrder(tableId, items, { name: customer.name.trim(), phone: customer.phone.trim() });
+      setCart([]);
+      setCustomer({ name: "", phone: "" });
       setTableId("");
       setStatus(order.added ? `Added to ${order.table.label}'s bill and sent to the kitchen.` : "Order sent to kitchen.");
     } catch (e) {
@@ -115,8 +119,7 @@ export default function OrderEntry() {
     try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { /* not available (tests) */ }
   }
 
-  const cartItems = Object.values(cart);
-  const total = cartItems.reduce((sum, { menuItem, quantity }) => sum + Number(menuItem.price) * quantity, 0);
+  const total = cart.reduce((sum, { menuItem, quantity }) => sum + Number(menuItem.price) * quantity, 0);
 
   return (
     <div>
@@ -148,10 +151,11 @@ export default function OrderEntry() {
                   <div
                     key={item.id}
                     className={`menu-card ${soldOut ? "sold-out" : ""}`}
-                    onClick={() => !soldOut && addItem(item)}
+                    onClick={() => !soldOut && addItem(item, cat.noteHint)}
                   >
                     <div className="name">{item.name}</div>
                     <div className="price">{rp(item.price)}</div>
+                    {item.spiceOption && <div className="stock-note">Spicy / not spicy</div>}
                     {item.trackStock && (
                       <div className={`stock-note ${item.onHand <= 5 ? "low" : ""}`}>
                         {soldOut ? "Sold out" : `${item.onHand} left`}
@@ -166,19 +170,44 @@ export default function OrderEntry() {
 
         <div className="cart-panel">
           <h3>{openForSelected ? `Add to ${openForSelected.table.label}'s open bill` : "Order for this table"}</h3>
-          {cartItems.length === 0 && <p>No items yet — tap a menu item above.</p>}
-          {cartItems.map(({ menuItem, quantity }) => (
-            <div key={menuItem.id} className="cart-row">
-              <span>{menuItem.name}</span>
-              <div className="qty-controls">
-                <button onClick={() => changeQty(menuItem.id, -1)}>-</button>
-                <span>{quantity}</span>
-                <button onClick={() => changeQty(menuItem.id, 1)}>+</button>
+          {openForSelected?.customer?.name && <p className="stock-note">Customer: {openForSelected.customer.name}</p>}
+          {cart.length === 0 && <p>No items yet — tap a menu item above.</p>}
+          {cart.map((l) => (
+            <div key={l.key} className="cart-line">
+              <div className="cart-row">
+                <span>{l.menuItem.name}</span>
+                <div className="qty-controls">
+                  <button onClick={() => changeQty(l.key, -1)} aria-label={`One less ${l.menuItem.name}`}>-</button>
+                  <span>{l.quantity}</span>
+                  <button onClick={() => changeQty(l.key, 1)} aria-label={`One more ${l.menuItem.name}`}>+</button>
+                </div>
+              </div>
+              <div className="cart-extras">
+                {l.menuItem.spiceOption && (
+                  <select value={l.spice} onChange={(e) => updateLine(l.key, { spice: e.target.value })} aria-label={`Spice for ${l.menuItem.name}`}>
+                    <option value="">Spice: not asked</option>
+                    <option value="SPICY">Spicy</option>
+                    <option value="NOT_SPICY">Not spicy</option>
+                  </select>
+                )}
+                <input
+                  value={l.notes}
+                  maxLength={200}
+                  onChange={(e) => updateLine(l.key, { notes: e.target.value })}
+                  placeholder={l.hint || "Note for the kitchen (optional)"}
+                  aria-label={`Note for ${l.menuItem.name}`}
+                />
               </div>
             </div>
           ))}
-          {cartItems.length > 0 && (
+          {cart.length > 0 && (
             <>
+              <div className="cart-extras" style={{ marginTop: "0.75rem" }}>
+                <input value={customer.name} maxLength={60} onChange={(e) => setCustomer({ ...customer, name: e.target.value })}
+                  placeholder={openForSelected ? "Customer name (leave empty to keep)" : "Customer name (optional)"} aria-label="Customer name" />
+                <input value={customer.phone} maxLength={30} inputMode="tel" onChange={(e) => setCustomer({ ...customer, phone: e.target.value })}
+                  placeholder="Phone (optional)" aria-label="Customer phone" />
+              </div>
               <div className="cart-row" style={{ fontWeight: 700 }}>
                 <span>Total (before tax)</span>
                 <span>{rp(total)}</span>
@@ -199,13 +228,17 @@ export default function OrderEntry() {
             return (
               <div key={order.id} style={{ marginBottom: "1rem", paddingBottom: "1rem", borderBottom: "1px solid #eee" }}>
                 <div style={{ fontWeight: 700, marginBottom: "0.5rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span>{order.table.label}</span>
+                  <span>
+                    {order.table.label}
+                    {order.customer?.name && <span className="stock-note"> · {order.customer.name}{order.customer.phone ? ` (${order.customer.phone})` : ""}</span>}
+                  </span>
                   <button className="small" onClick={() => addMoreTo(order)}>Add more</button>
                 </div>
                 {order.items.map((item) => (
                   <div key={item.id} className={`cart-row ${item.status === "CANCELLED" ? "voided" : ""}`}>
                     <span>
                       {item.quantity}x {item.menuItem.name}
+                      <LineExtras item={item} />
                     </span>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                       <span className={`status-pill status-${item.status}`}>{item.status}</span>

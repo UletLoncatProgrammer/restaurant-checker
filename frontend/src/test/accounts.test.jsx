@@ -25,6 +25,8 @@ vi.mock("../lib/api", () => ({
     resetPassword: vi.fn(),
     getTables: vi.fn().mockResolvedValue([]),
     getCategories: vi.fn().mockResolvedValue([]),
+    updateMenuItem: vi.fn().mockResolvedValue({}),
+    getSettings: vi.fn().mockResolvedValue({ kitchenMode: "ONE" }),
     getOpenOrders: vi.fn().mockResolvedValue([]),
   },
 }));
@@ -134,5 +136,16 @@ describe("admin page", () => {
     api.getRoles.mockResolvedValue(roleRows());
     fireEvent.click((await screen.findAllByRole("button", { name: "Remove" }))[0]);
     await waitFor(() => expect(api.setRoleEnabled).toHaveBeenCalledWith("COORDINATOR", false));
+  });
+
+  it("a dish can be switched to 'count stock' from the menu list", async () => {
+    api.getUsers.mockResolvedValue([]);
+    api.getCategories.mockResolvedValue([{ id: "c1", name: "Drinks", menuItems: [{ id: "m1", name: "Aqua", price: 8000, station: "BAR", trackStock: false }] }]);
+    renderAs(ADMIN, <App />, "/admin");
+    fireEvent.click(await screen.findByRole("button", { name: "Menu" }));
+    fireEvent.click(await screen.findByLabelText("Count stock for Aqua"));
+    await waitFor(() => expect(api.updateMenuItem).toHaveBeenCalledWith("m1", { trackStock: true }));
+    expect(await screen.findByText(/add the first delivery in Dashboard > Stock/)).toBeInTheDocument();
+    api.getCategories.mockResolvedValue([]);
   });
 });

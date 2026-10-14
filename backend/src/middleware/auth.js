@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const { query } = require("../db");
 const { config } = require("../config");
+const { permissionsFor, requirePerm } = require("../lib/permissions");
 
 const JWT_SECRET = config.jwtSecret;
 
@@ -58,8 +59,9 @@ async function requireAuth(req, res, next) {
     if (!user || !user.active || (payload.tv || 0) !== user.token_version) {
       return res.status(401).json({ error: "Invalid or expired token" });
     }
-    // Role and location come from the database, never from the token.
-    req.user = { sub: user.id, role: user.role, locationId: user.location_id, name: user.name };
+    // Role, its permissions and the location come from the database, never from the token.
+    const permissions = await permissionsFor(user.location_id, user.role);
+    req.user = { sub: user.id, role: user.role, locationId: user.location_id, name: user.name, permissions };
     if (user.must_change_password && !ALLOWED_WHILE_MUST_CHANGE.has(req.baseUrl + req.path)) {
       return res.status(403).json({ error: "You must choose a new password first", code: "PASSWORD_CHANGE_REQUIRED" });
     }
@@ -69,18 +71,6 @@ async function requireAuth(req, res, next) {
   }
 }
 
-// Every operational query in this app is location-scoped. This is the
-// enforcement point for multi-tenant isolation — routes must call this
-// (or read req.user.locationId directly) rather than trusting a locationId
-// from the request body/query string.
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role)) {
-      return res.status(403).json({ error: `Requires role: ${roles.join(" or ")}` });
-    }
-    next();
-  };
-}
 
 // Verifies a raw token the same way (used by the socket handshake).
 async function authenticateToken(token) {
@@ -92,7 +82,9 @@ async function authenticateToken(token) {
   }
   const user = await loadUser(payload.sub);
   if (!user || !user.active || (payload.tv || 0) !== user.token_version || user.must_change_password) return null;
-  return { sub: user.id, role: user.role, locationId: user.location_id };
+  return { sub: user.id, role: user.role, locationId: user.location_id, permissions: await permissionsFor(user.location_id, user.role) };
 }
 
-module.exports = { signToken, requireAuth, requireRole, invalidateUser, authenticateToken };
+// Every operational query in this app is location-scoped (req.user.locationId);
+// what a person may do is checked with requirePerm("PAY") etc. (lib/permissions.js).
+module.exports = { signToken, requireAuth, requirePerm, invalidateUser, authenticateToken };

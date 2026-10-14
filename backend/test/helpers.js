@@ -38,6 +38,9 @@ async function createTenant({ timezone = "Asia/Jakarta", name = "Test" } = {}) {
   await pool.query("INSERT INTO locations (id, organization_id, name, timezone) VALUES ($1, $2, $3, $4)", [
     locationId, orgId, `${name} Loc ${locationId.slice(0, 6)}`, timezone,
   ]);
+  // Older tests were written before service charge existed: no service charge here
+  // (tax 10% on the bill, as before). test/billing.test.js covers service and discounts.
+  await pool.query("UPDATE locations SET service_rate = 0 WHERE id = $1", [locationId]);
   const tables = {};
   for (const label of ["T1", "T2", "T3"]) {
     tables[label] = uid();

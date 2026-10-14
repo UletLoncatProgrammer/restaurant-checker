@@ -51,7 +51,7 @@ describe("POS", () => {
     expect(screen.getByText(/Change: Rp 1\.000/)).toBeInTheDocument();
     fireEvent.click(charge);
 
-    await waitFor(() => expect(api.pay).toHaveBeenCalledWith("o1", "CASH", 100000));
+    await waitFor(() => expect(api.pay).toHaveBeenCalledWith("o1", "CASH", 100000, undefined)); // no member
     expect(await screen.findByText(/Receipt #12/)).toBeInTheDocument();
     expect(screen.getByText("Print receipt")).toBeInTheDocument();
   });

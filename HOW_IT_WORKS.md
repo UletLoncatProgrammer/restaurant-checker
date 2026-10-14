@@ -50,14 +50,36 @@ Report tab → choose Daily or Weekly (and optionally a date) → "Download Exce
 
 Every screen keeps a live connection open to the server (a WebSocket, via a library called Socket.IO) — think of it less like refreshing a webpage and more like a phone line that stays open, so the server can speak the moment something changes rather than waiting to be asked. When any item's status changes, the server pushes that single update to every connected screen for that restaurant branch, and each screen updates just that one row on the page. Nobody has to hit refresh, and it's not polling the server every few seconds and hoping — it's told immediately. Screens for a *different* restaurant branch never receive these updates, even though they might be talking to the same physical server (this is the multi-location isolation from the architecture doc).
 
-## What each role can and can't do (enforced by the server, not just hidden buttons)
+## Roles and permissions (enforced by the server, not just hidden buttons)
 
-- **FOH**: create orders, mark items delivered, take payment. Cannot void, cannot see transactions, cannot download reports.
-- **KITCHEN**: mark items preparing/ready. Cannot create orders, cannot mark delivered, cannot see money.
-- **COORDINATOR**: everything on the floor, plus the transactions/activity/stock views and the Excel report. **Cannot void.**
-- **SUPERVISOR**: floor access plus transactions/activity/stock, and the **only role (with ADMIN) that can void**. Cannot download the Excel report.
-- **ADMIN**: everything.
-There is no self-registration. The company's ADMIN (or COORDINATOR for menu and tables) uses the **Admin** screen to add staff, change roles, disable people and issue temporary passwords; staff must choose their own password at first sign-in. An ADMIN can also remove built-in roles the company does not use (Admin > Roles) and bring them back; a role can only be removed when nobody active holds it, and ADMIN can never be removed. The first ADMIN of a company is created by the operator with `deploy/new-company.sh`.
+A role is a name plus tick-boxes (permissions): **Orders** (take orders, serve dishes), **Payment** (POS), **Hot kitchen / Cold kitchen / Bar** screens, **Dashboard** (live tables, payments, activity, stock), **History** (kitchen and bar history), **Void**, **Excel** report, **Menu** (menu, tables, kitchen setup) and **Staff & roles** (Admin only).
+
+The five built-in roles are ready-made presets:
+
+- **Waiter (FOH)**: orders and payment.
+- **Kitchen / bar**: the hot kitchen, cold kitchen and bar screens.
+- **Coordinator**: everything on the floor, dashboard, history, Excel report, menu. Cannot void.
+- **Supervisor**: everything on the floor, dashboard, history, and void. No Excel report.
+- **Admin**: everything, always.
+
+In **Admin > Roles** an Admin can change the tick-boxes of any role except Admin, create the restaurant's own roles (e.g. "Food runner" = Orders only, "Barista" = Bar screen only), delete own roles nobody holds, and switch off built-in roles the restaurant doesn't use. Changes apply at once: people with that role are reconnected with their new screens. Kitchen-only roles never receive customers' phone numbers.
+
+There is no self-registration. The Admin uses **Admin > Staff** to add people, choose their role, disable them and issue temporary passwords; staff must choose their own password at first sign-in. The first Admin of a company is created when the company is set up (`deploy/new-company.sh` on the VPS, or the on-site installer).
+
+## The bill: member discount, service charge, tax
+
+At payment the bill is worked out by the server, in this order:
+
+1. **Food & drinks** — the prices frozen when each dish was ordered (voided dishes left out).
+2. **Member discount** — if the cashier found a member by phone, their discount % comes off the food.
+3. **Service charge** — a % of the food after discount (Admin > Billing; new restaurants start at 5%).
+4. **Tax** — the restaurant tax (PBJT, printed as e.g. "PB1"), a % of food after discount, plus the service charge
+   if "tax on service" is ticked (new restaurants: 10%, ticked). In Indonesia restaurant meals pay PBJT, not VAT;
+   it is at most 10% and each city sets its own rate — check yours.
+
+Each part is rounded to whole rupiah. The payment keeps the rates used, so changing them later never changes old
+bills. Only Admin can change the rates; the member list is kept by roles with the "Members" tick-box
+(Admin, Coordinator and Supervisor by default) and cashiers can only look members up.
 
 ## Sound alerts
 

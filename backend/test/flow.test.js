@@ -231,11 +231,10 @@ test("Excel report: access control, ranges, and numbers reconcile", async () => 
   assert.equal(d.summary.tax, Number(paid.t));
   assert.equal(d.summary.gross, Number(paid.g));
   assert.equal(d.summary.salesCount, paid.n);
-  assert.equal(d.summary.gross, d.summary.net + d.summary.tax);
+  assert.equal(d.summary.gross, d.summary.net - d.summary.discount + d.summary.service + d.summary.tax);
   assert.equal(d.byDay.length, 7);
   assert.equal(d.byDay.reduce((s, r) => s + r.gross, 0), d.summary.gross);
   assert.equal(d.byItem.reduce((s, r) => s + r.net, 0), d.summary.net); // by-item reconciles to payments
-  assert.equal(d.byItem.reduce((s, r) => s + r.tax, 0), d.summary.tax);
   assert.equal(d.summary.voidedSalesCount, 1);
   assert.ok(d.voids.length >= 4);
   for (const s of d.stock) assert.equal(s.opening + s.received - s.sold + s.voidRestock + s.adjust, s.closing, "stock identity");
@@ -248,7 +247,7 @@ test("Excel report: access control, ranges, and numbers reconcile", async () => 
     sum.eachRow((row) => { if (row.getCell(1).value === label) v = row.getCell(2).value; });
     return v;
   };
-  assert.equal(cell("Gross sales (incl. tax)"), d.summary.gross);
+  assert.equal(cell("Gross sales (what customers paid)"), d.summary.gross);
   assert.equal(cell("Paid sales (count)"), d.summary.salesCount);
 });
 

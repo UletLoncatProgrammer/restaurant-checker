@@ -5,6 +5,10 @@
 	local_certs
 	skip_install_trust
 	auto_https disable_redirects
+	# A browser opening an address made of numbers (https://192.168.1.50) does not say which
+	# name it wants (no "SNI"). Without this line Caddy cannot pick a certificate and the
+	# tablet shows ERR_SSL_PROTOCOL_ERROR. RC_DEFAULT_SNI = the Wi-Fi address tablets use.
+	default_sni {$RC_DEFAULT_SNI}
 }
 
 # RC_SITES is written by the start/install script, e.g. "https://192.168.1.50, https://localhost"
@@ -27,7 +31,9 @@ http:// {
 	handle /rc-root.crt {
 		root * /data/caddy/pki/authorities/local
 		rewrite * /root.crt
-		header Content-Type application/x-x509-ca-cert
+		# octet-stream: Android must SAVE the file (then install it in Settings); the
+		# certificate content type makes Chrome try to install it and save nothing
+		header Content-Type application/octet-stream
 		header Content-Disposition "attachment; filename=rc-root.crt"
 		file_server
 	}

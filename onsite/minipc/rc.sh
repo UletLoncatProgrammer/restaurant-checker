@@ -63,6 +63,8 @@ JWT_SECRET="$2"
 COMPANY_NAME="$3"
 RC_SITES="$4"
 CORS_ORIGIN="$cors"
+# certificate for tablets that open the plain address (they send no name): the first address
+RC_DEFAULT_SNI="$(echo "$4" | awk '{print $1}' | sed 's|^https://||')"
 # Optional off-site backup target for rsync, e.g. backup@100.101.102.103:/srv/backups/my-restaurant/
 RC_OFFSITE="${5:-}"
 EOF

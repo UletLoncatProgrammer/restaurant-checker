@@ -52,7 +52,7 @@ function Read-Settings {
 }
 
 function Write-Settings($h) {
-  $keys = @('POSTGRES_PASSWORD', 'JWT_SECRET', 'COMPANY_NAME', 'RC_SITES', 'CORS_ORIGIN')
+  $keys = @('POSTGRES_PASSWORD', 'JWT_SECRET', 'COMPANY_NAME', 'RC_SITES', 'CORS_ORIGIN', 'RC_DEFAULT_SNI')
   $lines = @('# Restaurant Checker (laptop) settings. Written by start.ps1 - keep this file private.')
   foreach ($k in $keys) { if ($h.ContainsKey($k)) { $lines += ($k + '="' + $h[$k] + '"') } }
   [System.IO.File]::WriteAllText($EnvFile, (($lines -join "`r`n") + "`r`n"), $Utf8NoBom)

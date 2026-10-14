@@ -38,6 +38,7 @@ Run 'test 127.0.0.1:443' { Test-Port '127.0.0.1' 443 }
 Run 'test 127.0.0.1:80' { Test-Port '127.0.0.1' 80 }
 Run 'test [::1]:443' { Test-Port '::1' 443 }
 Run 'curl https://localhost (windows)' { & curl.exe -sk -o NUL -w 'http=%{http_code} err=%{errormsg}' --max-time 5 https://localhost/health }
+Run 'curl https://<wifi address>/health (like a tablet)' { $l = Get-LanInfo; if ($l) { & curl.exe -sk -o NUL -w 'http=%{http_code} err=%{errormsg}' --max-time 8 "https://$($l.Ip)/health" } else { 'no wifi' } }
 Run 'curl http://localhost/rc-root.crt (windows)' { & curl.exe -s -o NUL -w 'http=%{http_code}' --max-time 5 http://localhost/rc-root.crt }
 Run 'inside podman machine: listening' { & podman machine ssh 'ss -ltn' }
 Run 'inside podman machine: curl https://localhost' { & podman machine ssh 'curl -sk -o /dev/null -w "http=%{http_code}" --max-time 5 https://localhost/health || echo curl-failed' }

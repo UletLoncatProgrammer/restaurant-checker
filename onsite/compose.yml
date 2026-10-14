@@ -39,6 +39,7 @@ services:
     depends_on: [app]
     environment:
       RC_SITES: ${RC_SITES}
+      RC_DEFAULT_SNI: ${RC_DEFAULT_SNI:-localhost}   # certificate used when a tablet opens the plain address
     ports:
       - "80:80"     # certificate download for tablets, and redirect to https
       - "443:443"   # the app

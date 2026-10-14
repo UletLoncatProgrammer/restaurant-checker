@@ -348,3 +348,95 @@ DO $$ BEGIN
     CREATE UNIQUE INDEX IF NOT EXISTS uniq_open_order_per_table ON orders(table_id) WHERE status = 'OPEN';
   END IF;
 END $$;
+
+-- ===========================================================================
+-- v6: customer on the bill, spice choice and note hints, kitchen history.
+--   * orders: optional customer name and phone (the phone is never sent to kitchen screens)
+--   * menu: a dish can offer "Spicy / Not spicy"; a category can give waiters a note hint
+--   * order lines: chosen spice, and who marked them READY / DELIVERED and when (history)
+-- ===========================================================================
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_name TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_phone TEXT;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_customer_lengths;
+ALTER TABLE orders ADD CONSTRAINT orders_customer_lengths
+  CHECK (coalesce(length(customer_name), 0) <= 60 AND coalesce(length(customer_phone), 0) <= 30);
+
+ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS spice_option BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS note_hint TEXT;
+ALTER TABLE menu_categories DROP CONSTRAINT IF EXISTS menu_categories_note_hint_length;
+ALTER TABLE menu_categories ADD CONSTRAINT menu_categories_note_hint_length CHECK (coalesce(length(note_hint), 0) <= 80);
+
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS spice TEXT;
+ALTER TABLE order_items DROP CONSTRAINT IF EXISTS order_items_spice_valid;
+ALTER TABLE order_items ADD CONSTRAINT order_items_spice_valid CHECK (spice IS NULL OR spice IN ('SPICY', 'NOT_SPICY'));
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS ready_at TIMESTAMPTZ;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS ready_by_id TEXT REFERENCES users(id);
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivered_by_id TEXT REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS idx_order_items_ready_at ON order_items(ready_at) WHERE ready_at IS NOT NULL;
+
+-- ===========================================================================
+-- v7: custom roles. Each company can make its own roles (e.g. "Food runner") and
+-- choose what each role may do with tick-boxes (permissions). The five built-in
+-- roles stay as presets; a row here for a built-in key overrides its permissions.
+-- ADMIN always has every permission (enforced in the app).
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS roles (
+  location_id TEXT NOT NULL REFERENCES locations(id),
+  key TEXT NOT NULL CHECK (key ~ '^[A-Z][A-Z0-9_]{1,29}$'),
+  label TEXT NOT NULL CHECK (length(label) BETWEEN 2 AND 40),
+  permissions TEXT[] NOT NULL DEFAULT '{}',
+  builtin BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (location_id, key)
+);
+-- users.role used to be a fixed list (enum); it is now any role key of the company.
+DO $$ BEGIN
+  IF (SELECT data_type FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'users' AND column_name = 'role') = 'USER-DEFINED' THEN
+    ALTER TABLE users ALTER COLUMN role TYPE TEXT USING role::text;
+  END IF;
+END $$;
+
+-- ===========================================================================
+-- v8: billing - restaurant tax (PBJT, shown as e.g. "PB1"), service charge, member discount.
+--   Bill = food subtotal - member discount + service charge + tax, each rounded to whole
+--   currency units. The tax base is (subtotal - discount) + service when tax_on_service,
+--   otherwise (subtotal - discount). Every rate is set per restaurant (Admin > Billing):
+--   PBJT is at most 10% by law but each city sets its own rate.
+--   The per-dish tax_rate columns from v1 are kept for history but no longer used for new bills.
+-- ===========================================================================
+ALTER TABLE locations ADD COLUMN IF NOT EXISTS tax_label TEXT NOT NULL DEFAULT 'PB1';
+ALTER TABLE locations ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(5, 4) NOT NULL DEFAULT 0.10;
+ALTER TABLE locations ADD COLUMN IF NOT EXISTS service_rate NUMERIC(5, 4) NOT NULL DEFAULT 0.05;
+ALTER TABLE locations ADD COLUMN IF NOT EXISTS tax_on_service BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE locations DROP CONSTRAINT IF EXISTS locations_billing_valid;
+ALTER TABLE locations ADD CONSTRAINT locations_billing_valid CHECK (
+  tax_rate >= 0 AND tax_rate <= 0.25 AND service_rate >= 0 AND service_rate <= 0.25
+  AND length(tax_label) BETWEEN 1 AND 20);
+
+-- Members: found by phone at the till; their discount applies to the food before service and tax.
+CREATE TABLE IF NOT EXISTS members (
+  id TEXT PRIMARY KEY,
+  location_id TEXT NOT NULL REFERENCES locations(id),
+  name TEXT NOT NULL CHECK (length(name) BETWEEN 2 AND 60),
+  phone TEXT NOT NULL CHECK (length(phone) <= 30),          -- as typed, for display
+  phone_key TEXT NOT NULL CHECK (phone_key ~ '^[0-9]{6,15}$'), -- digits only, "+62 812" = "0812"
+  discount_rate NUMERIC(5, 4) NOT NULL CHECK (discount_rate > 0 AND discount_rate <= 1),
+  note TEXT CHECK (coalesce(length(note), 0) <= 200),
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (location_id, phone_key)
+);
+
+-- Each payment keeps the numbers and rates used, so a later change of rates never changes old bills.
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS discount NUMERIC(12, 2) NOT NULL DEFAULT 0;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS service NUMERIC(12, 2) NOT NULL DEFAULT 0;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS member_id TEXT REFERENCES members(id);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS member_name TEXT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS discount_rate NUMERIC(5, 4);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS service_rate NUMERIC(5, 4);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(5, 4);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS tax_label TEXT;
+ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_total_matches;
+ALTER TABLE payments ADD CONSTRAINT payments_total_matches CHECK (total = subtotal - discount + service + tax);

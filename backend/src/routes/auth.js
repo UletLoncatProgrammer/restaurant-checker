@@ -6,6 +6,7 @@ const { passwordProblem } = require("../lib/password");
 const { logAuth } = require("../lib/audit");
 const { createLimiter } = require("../lib/rateLimit");
 const { disconnectUser } = require("../socket");
+const { rolesOf } = require("../lib/permissions");
 
 const router = require("../lib/asyncRouter")();
 
@@ -22,8 +23,15 @@ const DUMMY_HASH = bcrypt.hashSync("not-a-real-password", 10);
 
 const normalizeEmail = (e) => (typeof e === "string" ? e.trim().toLowerCase() : "");
 
-function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.email, role: u.role, locationId: u.location_id };
+// What the app needs to know about the signed-in person, including what their role may do
+// (the screens use it to show only what they can use; the server checks again on every request).
+async function publicUser(u) {
+  const role = (await rolesOf(u.location_id)).get(u.role);
+  return {
+    id: u.id, name: u.name, email: u.email, role: u.role, locationId: u.location_id,
+    roleLabel: role ? role.label : u.role,
+    permissions: role ? role.permissions : [],
+  };
 }
 
 router.post("/login", loginLimiter, async (req, res) => {
@@ -62,14 +70,14 @@ router.post("/login", loginLimiter, async (req, res) => {
   await query("UPDATE users SET failed_logins = 0, locked_until = NULL, last_login_at = now() WHERE id = $1", [user.id]);
   await logAuth({ locationId: user.location_id, userId: user.id, type: "LOGIN_OK", email, ip: req.ip });
   const token = signToken({ id: user.id, role: user.role, locationId: user.location_id, tokenVersion: user.token_version });
-  res.json({ token, user: publicUser(user), mustChangePassword: user.must_change_password });
+  res.json({ token, user: await publicUser(user), mustChangePassword: user.must_change_password });
 });
 
 // Who am I? Lets an app confirm a saved token is still valid (account active,
 // password not reset) when it starts up.
 router.get("/me", requireAuth, async (req, res) => {
   const { rows } = await query("SELECT * FROM users WHERE id = $1", [req.user.sub]);
-  res.json({ user: publicUser(rows[0]), mustChangePassword: rows[0].must_change_password });
+  res.json({ user: await publicUser(rows[0]), mustChangePassword: rows[0].must_change_password });
 });
 
 // Choose a new password (also the only thing a person with a temporary password
@@ -99,7 +107,7 @@ router.post("/change-password", requireAuth, async (req, res) => {
   disconnectUser(user.id);
   await logAuth({ locationId: user.location_id, userId: user.id, type: "PASSWORD_CHANGED", email: user.email, ip: req.ip });
   const token = signToken({ id: user.id, role: user.role, locationId: user.location_id, tokenVersion: upd.rows[0].token_version });
-  res.json({ token, user: publicUser(user), mustChangePassword: false });
+  res.json({ token, user: await publicUser(user), mustChangePassword: false });
 });
 
 module.exports = router;

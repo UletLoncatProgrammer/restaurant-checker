@@ -10,9 +10,10 @@ router.use(requireAuth);
 // All queries below use req.user.locationId, never a client-supplied
 // locationId — that's the multi-tenant isolation boundary.
 
-const EDITORS = ["ADMIN", "COORDINATOR"];
+// Editing the menu, tables and kitchen setup needs the MENU permission.
+const { can } = require("../lib/permissions");
 function requireEditor(req) {
-  if (!EDITORS.includes(req.user.role)) throw new HttpError(403, "Requires ADMIN or COORDINATOR");
+  if (!can(req.user, "MENU")) throw new HttpError(403, "Not allowed to edit the menu (needs permission MENU)");
 }
 
 function cleanName(raw, what, max = 80) {
@@ -48,14 +49,17 @@ async function assertCategory(locationId, categoryId) {
   return categoryId;
 }
 
+// ?all=1 (menu editors only) also returns switched-off dishes, marked active:false,
+// so they can be switched back on.
 router.get("/categories", async (req, res) => {
+  const all = req.query.all === "1" && can(req.user, "MENU");
   const { rows: categories } = await query(
     "SELECT * FROM menu_categories WHERE location_id = $1 ORDER BY sort_order ASC, name ASC",
     [req.user.locationId]
   );
   const { rows: items } = await query(
-    "SELECT * FROM menu_items WHERE location_id = $1 AND active = true ORDER BY name ASC",
-    [req.user.locationId]
+    `SELECT * FROM menu_items WHERE location_id = $1 AND (active = true OR $2) ORDER BY name ASC`,
+    [req.user.locationId, all]
   );
 
   const trackedIds = items.filter((i) => i.track_stock).map((i) => i.id);
@@ -65,6 +69,7 @@ router.get("/categories", async (req, res) => {
     id: cat.id,
     name: cat.name,
     sortOrder: cat.sort_order,
+    noteHint: cat.note_hint || "",
     menuItems: items
       .filter((i) => i.category_id === cat.id)
       .map((i) => ({
@@ -74,6 +79,8 @@ router.get("/categories", async (req, res) => {
         taxRate: i.tax_rate,
         station: i.station,
         trackStock: i.track_stock,
+        spiceOption: i.spice_option,
+        active: i.active,
         onHand: i.track_stock ? onHand.get(i.id) : null,
       })),
   }));
@@ -97,10 +104,11 @@ router.post("/items", async (req, res) => {
   const station = b.station === undefined ? "KITCHEN" : cleanStation(b.station);
   const categoryId = await assertCategory(req.user.locationId, b.categoryId);
   if (b.trackStock !== undefined && typeof b.trackStock !== "boolean") throw new HttpError(400, "trackStock must be true or false");
+  if (b.spiceOption !== undefined && typeof b.spiceOption !== "boolean") throw new HttpError(400, "spiceOption must be true or false");
   const { rows } = await query(
-    `INSERT INTO menu_items (id, location_id, name, price, tax_rate, category_id, station, track_stock)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-    [crypto.randomUUID(), req.user.locationId, name, price, taxRate, categoryId, station, b.trackStock === true]
+    `INSERT INTO menu_items (id, location_id, name, price, tax_rate, category_id, station, track_stock, spice_option)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+    [crypto.randomUUID(), req.user.locationId, name, price, taxRate, categoryId, station, b.trackStock === true, b.spiceOption === true]
   );
   res.status(201).json(rows[0]);
 });
@@ -120,6 +128,7 @@ router.patch("/items/:id", async (req, res) => {
   if (b.categoryId !== undefined) add("category_id", await assertCategory(req.user.locationId, b.categoryId));
   if (b.active !== undefined) { if (typeof b.active !== "boolean") throw new HttpError(400, "active must be true or false"); add("active", b.active); }
   if (b.trackStock !== undefined) { if (typeof b.trackStock !== "boolean") throw new HttpError(400, "trackStock must be true or false"); add("track_stock", b.trackStock); }
+  if (b.spiceOption !== undefined) { if (typeof b.spiceOption !== "boolean") throw new HttpError(400, "spiceOption must be true or false"); add("spice_option", b.spiceOption); }
   if (sets.length === 0) throw new HttpError(400, "Nothing to change");
   const { rows } = await query(`UPDATE menu_items SET ${sets.join(", ")} WHERE id = $1 AND location_id = $2 RETURNING *`, vals);
   if (rows.length === 0) throw new HttpError(404, "Menu item not found for this location");
@@ -137,18 +146,30 @@ router.post("/categories", async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
+// Rename, reorder, set the waiters' note hint, and/or move every dish of the
+// category to one station ({ station: "BAR" }).
 router.patch("/categories/:id", async (req, res) => {
   requireEditor(req);
   const b = req.body || {};
   const name = b.name === undefined ? null : cleanName(b.name, "name", 60);
   const sort = b.sortOrder === undefined ? null : b.sortOrder;
   if (sort !== null && !Number.isInteger(sort)) throw new HttpError(400, "sortOrder must be a whole number");
+  let hint = null;
+  if (b.noteHint !== undefined) {
+    if (typeof b.noteHint !== "string" || b.noteHint.trim().length > 80) throw new HttpError(400, "noteHint must be text of 80 characters or fewer");
+    hint = b.noteHint.trim();
+  }
+  const station = b.station === undefined ? null : cleanStation(b.station);
   const { rows } = await query(
-    `UPDATE menu_categories SET name = COALESCE($3, name), sort_order = COALESCE($4, sort_order)
+    `UPDATE menu_categories SET name = COALESCE($3, name), sort_order = COALESCE($4, sort_order),
+            note_hint = CASE WHEN $5::text IS NULL THEN note_hint ELSE NULLIF($5, '') END
      WHERE id = $1 AND location_id = $2 RETURNING *`,
-    [req.params.id, req.user.locationId, name, sort]
+    [req.params.id, req.user.locationId, name, sort, hint]
   );
   if (rows.length === 0) throw new HttpError(404, "Category not found for this location");
+  if (station) {
+    await query("UPDATE menu_items SET station = $3 WHERE category_id = $1 AND location_id = $2", [req.params.id, req.user.locationId, station]);
+  }
   res.json(rows[0]);
 });
 

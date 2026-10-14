@@ -1,6 +1,6 @@
-import { createContext, useContext, useState, useCallback } from "react";
+import { createContext, useContext, useState, useCallback, useEffect } from "react";
 import { api } from "../lib/api";
-import { closeSocket } from "../lib/socket";
+import { closeSocket, getSocket } from "../lib/socket";
 import { resetSettings } from "../hooks/useSettings";
 
 const AuthContext = createContext(null);
@@ -33,6 +33,37 @@ export function AuthProvider({ children }) {
     store(token, user, false);
     return user;
   }, []);
+
+  // Keep the role and its permissions current: on start-up, and whenever the server
+  // signs this screen out of the live connection (e.g. an admin changed the role's
+  // tick-boxes) - then reconnect with the new permissions.
+  const userId = user && user.id;
+  useEffect(() => {
+    if (!userId || typeof api.me !== "function") return undefined;
+    let stopped = false;
+    const refresh = () =>
+      api
+        .me()
+        .then(({ user: fresh, mustChangePassword: must }) => {
+          if (stopped || !fresh) return;
+          localStorage.setItem("user", JSON.stringify(fresh));
+          if (must) localStorage.setItem("mustChange", "1");
+          setUser(fresh);
+          setMustChange(!!must);
+        })
+        .catch(() => {}); // 401 is handled by the api layer (back to sign-in)
+    refresh();
+    const socket = getSocket();
+    const onDrop = (reason) => {
+      if (reason !== "io server disconnect") return; // network blips reconnect by themselves
+      refresh().then(() => !stopped && socket.connect && socket.connect());
+    };
+    socket.on("disconnect", onDrop);
+    return () => {
+      stopped = true;
+      socket.off("disconnect", onDrop);
+    };
+  }, [userId]);
 
   const logout = useCallback(() => {
     localStorage.removeItem("token");

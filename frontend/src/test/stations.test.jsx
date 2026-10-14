@@ -155,7 +155,7 @@ describe("one open bill per table (order entry)", () => {
     fireEvent.click(await screen.findByText("Nasi Goreng", { selector: ".name" }));
     expect(screen.getByText("Add to Table 1's open bill")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add to bill" }));
-    await waitFor(() => expect(api.createOrder).toHaveBeenCalledWith("t1", [{ menuItemId: "m1", quantity: 1 }]));
+    await waitFor(() => expect(api.createOrder).toHaveBeenCalledWith("t1", [{ menuItemId: "m1", quantity: 1 }], { name: "", phone: "" }));
     expect(await screen.findByText(/Added to Table 1's bill/)).toBeInTheDocument();
   });
 });

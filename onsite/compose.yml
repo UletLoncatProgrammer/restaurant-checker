@@ -1,0 +1,50 @@
+# Restaurant Checker - ON-SITE version (laptop or mini PC inside the restaurant).
+# Everything runs on this one machine; tablets reach it over the restaurant Wi-Fi.
+# Works with no internet. Do not start by hand: use laptop\start.cmd or minipc/install.sh,
+# which build the two local images and fill in the settings file (.env).
+name: rc_onsite
+services:
+  db:
+    image: docker.io/library/postgres:16-alpine
+    container_name: rc_onsite_db
+    restart: always
+    environment:
+      POSTGRES_USER: rc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: rc
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # no published port: only the app can reach the database
+
+  app:
+    image: localhost/rc-onsite-app:latest
+    pull_policy: never
+    container_name: rc_onsite_app
+    restart: always            # if the database is still starting, the app exits and is restarted
+    depends_on: [db]
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DATABASE_URL: postgresql://rc:${POSTGRES_PASSWORD}@db:5432/rc
+      JWT_SECRET: ${JWT_SECRET}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      COMPANY_NAME: ${COMPANY_NAME:-}
+      TRUST_PROXY: "true"
+
+  caddy:
+    image: localhost/rc-onsite-caddy:latest
+    pull_policy: never
+    container_name: rc_onsite_caddy
+    restart: always
+    depends_on: [app]
+    environment:
+      RC_SITES: ${RC_SITES}
+    ports:
+      - "80:80"     # certificate download for tablets, and redirect to https
+      - "443:443"   # the app
+    volumes:
+      - caddy_data:/data   # Caddy's own certificate authority lives here: keep it, or every tablet must trust a new one
+
+volumes:
+  db_data:
+  caddy_data:

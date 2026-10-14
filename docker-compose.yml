@@ -1,9 +1,6 @@
-version: "3.8"
-
-# Designed to run on a machine physically on the restaurant's LAN (a mini
-# PC/NUC in the office is enough) so order-to-kitchen flow keeps working
-# even if the internet connection drops. Tablets connect to this machine's
-# local IP, not to a cloud URL. See ARCHITECTURE.md for the reasoning.
+# DEVELOPMENT ONLY - runs the app on your own computer with throw-away passwords.
+# Do NOT put this on a server. Real customers are set up with deploy/new-company.sh
+# (own database, random secrets, HTTPS) - see deploy/README.md.
 services:
   db:
     image: postgres:16-alpine
@@ -15,7 +12,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # this computer only
 
   backend:
     build: ./backend
@@ -24,11 +21,12 @@ services:
       - db
     environment:
       DATABASE_URL: postgresql://restaurant:restaurant@db:5432/restaurant_checker?schema=public
-      JWT_SECRET: change-this-to-a-long-random-string-before-any-real-deployment
+      JWT_SECRET: dev-only-secret-never-use-in-production
+      NODE_ENV: development   # the image defaults to production, which refuses these throw-away secrets
       PORT: 4000
-      CORS_ORIGIN: "*"
+      CORS_ORIGIN: "http://localhost:5173"
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
 
 volumes:
   db_data:

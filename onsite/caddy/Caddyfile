@@ -1,0 +1,37 @@
+# Local HTTPS for the restaurant network. No internet needed: Caddy runs its own small
+# certificate authority ("Caddy Local Authority"). Each tablet trusts it once, by installing
+# the file served at  http://<this machine>/rc-root.crt
+{
+	local_certs
+	skip_install_trust
+	auto_https disable_redirects
+}
+
+# RC_SITES is written by the start/install script, e.g. "https://192.168.1.50, https://localhost"
+{$RC_SITES} {
+	tls internal
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy app:4000
+}
+
+# Plain http on port 80: only the certificate download, everything else goes to https.
+http:// {
+	handle /rc-root.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		header Content-Type application/x-x509-ca-cert
+		header Content-Disposition "attachment; filename=rc-root.crt"
+		file_server
+	}
+	handle {
+		redir https://{host}{uri} 302
+	}
+}

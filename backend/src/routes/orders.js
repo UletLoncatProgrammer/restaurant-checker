@@ -1,69 +1,45 @@
-const express = require("express");
 const crypto = require("crypto");
-const { query, pool } = require("../db");
+const Router = require("../lib/asyncRouter");
+const { query, withTransaction } = require("../db");
 const { requireAuth } = require("../middleware/auth");
-const { emitToLocation } = require("../socket");
+const { emitToLocation, emitToRoles } = require("../socket");
+const { HttpError } = require("../lib/http");
+const { ROLES } = require("../lib/roles");
+const { logEvent, emitActivity } = require("../lib/events");
+const { onHandMap, addMovement, emitStock } = require("../lib/stock");
+const { getOpenOrders, getOrder } = require("../lib/orderShape");
 
-const router = express.Router();
+const router = Router();
 router.use(requireAuth);
 
-// Shapes a flat SQL join result (one row per order item) into the nested
-// { order, table, items: [{ menuItem }] } structure the frontend expects.
-function groupOrders(rows) {
-  const byOrder = new Map();
-  for (const r of rows) {
-    if (!byOrder.has(r.order_id)) {
-      byOrder.set(r.order_id, {
-        id: r.order_id,
-        locationId: r.location_id,
-        status: r.order_status,
-        openedAt: r.opened_at,
-        closedAt: r.closed_at,
-        table: { id: r.table_id, label: r.table_label },
-        items: [],
-      });
-    }
-    if (r.item_id) {
-      byOrder.get(r.order_id).items.push({
-        id: r.item_id,
-        quantity: r.quantity,
-        unitPrice: r.unit_price,
-        taxRate: r.item_tax_rate,
-        notes: r.notes,
-        status: r.item_status,
-        menuItem: { id: r.menu_item_id, name: r.menu_item_name },
-      });
-    }
-  }
-  return Array.from(byOrder.values());
+function cleanReason(raw) {
+  const reason = typeof raw === "string" ? raw.trim() : "";
+  if (reason.length < 3) throw new HttpError(400, "A reason (at least 3 characters) is required to void");
+  if (reason.length > 200) throw new HttpError(400, "Reason must be 200 characters or fewer");
+  return reason;
 }
 
-const OPEN_ORDERS_SQL = `
-  SELECT
-    o.id AS order_id, o.location_id, o.status AS order_status, o.opened_at, o.closed_at,
-    t.id AS table_id, t.label AS table_label,
-    oi.id AS item_id, oi.quantity, oi.unit_price, oi.tax_rate AS item_tax_rate,
-    oi.notes, oi.status AS item_status,
-    mi.id AS menu_item_id, mi.name AS menu_item_name
-  FROM orders o
-  JOIN restaurant_tables t ON t.id = o.table_id
-  LEFT JOIN order_items oi ON oi.order_id = o.id
-  LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
-  WHERE o.location_id = $1 AND o.status = 'OPEN'
-  ORDER BY o.opened_at ASC
-`;
+// Locks and returns the order row, scoped to the caller's location. Locking
+// serializes concurrent pay / void / status changes on the same order.
+async function lockOrder(client, locationId, orderId) {
+  const { rows } = await client.query(
+    `SELECT o.*, t.label AS table_label FROM orders o
+     JOIN restaurant_tables t ON t.id = o.table_id
+     WHERE o.id = $1 AND o.location_id = $2 FOR UPDATE OF o`,
+    [orderId, locationId]
+  );
+  if (rows.length === 0) throw new HttpError(404, "Order not found for this location");
+  return rows[0];
+}
 
 // GET /orders/open — every open order + items for this location.
-// Backs both the Kitchen Display and the Coordinator live board.
 router.get("/open", async (req, res) => {
-  const { rows } = await query(OPEN_ORDERS_SQL, [req.user.locationId]);
-  res.json(groupOrders(rows));
+  res.json(await getOpenOrders({ query }, req.user.locationId));
 });
 
-// GET /orders/outstanding-summary — per-menu-item ordered vs delivered
-// counts, computed live from order_item status (not a separately
-// maintained counter, so it can't drift out of sync). This backs the
-// Coordinator's "8x Nasi Goreng outstanding" view.
+// GET /orders/outstanding-summary — per-menu-item ordered vs delivered,
+// computed live from item status (no separate counter that could drift).
+// Cancelled (voided) items are excluded.
 router.get("/outstanding-summary", async (req, res) => {
   const { rows } = await query(
     `SELECT mi.id AS menu_item_id, mi.name,
@@ -76,146 +52,339 @@ router.get("/outstanding-summary", async (req, res) => {
      GROUP BY mi.id, mi.name`,
     [req.user.locationId]
   );
-  const result = rows.map((r) => ({
-    menuItemId: r.menu_item_id,
-    name: r.name,
-    ordered: Number(r.ordered),
-    delivered: Number(r.delivered),
-    outstanding: Number(r.ordered) - Number(r.delivered),
-  }));
-  res.json(result);
+  res.json(
+    rows.map((r) => ({
+      menuItemId: r.menu_item_id,
+      name: r.name,
+      ordered: Number(r.ordered),
+      delivered: Number(r.delivered),
+      outstanding: Number(r.ordered) - Number(r.delivered),
+    }))
+  );
 });
 
-// POST /orders — open a new order for a table with initial items.
+// POST /orders — send dishes for a table. If the table already has an OPEN order
+// (its running bill), the dishes are added to it; otherwise a new order is opened.
+// Response: the full order plus "added": true when it went onto an existing bill.
 router.post("/", async (req, res) => {
-  if (!["FOH", "COORDINATOR", "ADMIN"].includes(req.user.role)) {
-    return res.status(403).json({ error: "Requires FOH, COORDINATOR, or ADMIN" });
+  if (!ROLES.TAKE_ORDER.includes(req.user.role)) {
+    return res.status(403).json({ error: `Requires ${ROLES.TAKE_ORDER.join(", ")}` });
   }
   const { tableId, items } = req.body || {};
-  if (!tableId || !Array.isArray(items) || items.length === 0) {
+  if (typeof tableId !== "string" || !tableId || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "tableId and a non-empty items[] are required" });
   }
-
-  const { rows: tableRows } = await query(
-    "SELECT * FROM restaurant_tables WHERE id = $1 AND location_id = $2",
-    [tableId, req.user.locationId]
-  );
-  if (tableRows.length === 0) return res.status(404).json({ error: "Table not found for this location" });
-
-  const menuItemIds = items.map((i) => i.menuItemId);
-  const { rows: menuItems } = await query(
-    "SELECT * FROM menu_items WHERE id = ANY($1::text[]) AND location_id = $2",
-    [menuItemIds, req.user.locationId]
-  );
-  const menuItemById = new Map(menuItems.map((m) => [m.id, m]));
-
+  if (items.length > 100) return res.status(400).json({ error: "Too many items in one order" });
   for (const i of items) {
-    if (!menuItemById.has(i.menuItemId)) {
-      return res.status(400).json({ error: `Unknown menuItemId ${i.menuItemId} for this location` });
+    if (!i || typeof i !== "object" || typeof i.menuItemId !== "string" || !i.menuItemId) {
+      return res.status(400).json({ error: "Each item needs a menuItemId" });
+    }
+    const q = i.quantity === undefined ? 1 : i.quantity;
+    if (!Number.isInteger(q) || q < 1 || q > 99) {
+      return res.status(400).json({ error: "Each quantity must be a whole number from 1 to 99" });
+    }
+    if (i.notes !== undefined && i.notes !== null && (typeof i.notes !== "string" || i.notes.length > 200)) {
+      return res.status(400).json({ error: "notes must be text of 200 characters or fewer" });
     }
   }
 
-  const client = await pool.connect();
-  const orderId = crypto.randomUUID();
-  try {
-    await client.query("BEGIN");
-    await client.query(
-      `INSERT INTO orders (id, location_id, table_id, opened_by_id) VALUES ($1, $2, $3, $4)`,
-      [orderId, req.user.locationId, tableId, req.user.sub]
+  const locationId = req.user.locationId;
+  const { order, activity, stockIds, added, addedIds } = await withTransaction(async (client) => {
+    // Locking the table row makes two waiters sending to the same table at the
+    // same moment take turns, so the second one finds (and adds to) the first's order.
+    const { rows: tableRows } = await client.query(
+      "SELECT * FROM restaurant_tables WHERE id = $1 AND location_id = $2 AND active = true FOR UPDATE",
+      [tableId, locationId]
     );
+    if (tableRows.length === 0) throw new HttpError(404, "Table not found for this location");
+
+    const ids = [...new Set(items.map((i) => i.menuItemId))];
+    // Lock tracked menu rows in a stable order so two orders for the same
+    // low-stock item queue up instead of both seeing "1 left".
+    const { rows: menuItems } = await client.query(
+      `SELECT * FROM menu_items WHERE id = ANY($1::text[]) AND location_id = $2 AND active = true
+       ORDER BY id FOR UPDATE`,
+      [ids, locationId]
+    );
+    const byId = new Map(menuItems.map((m) => [m.id, m]));
     for (const i of items) {
-      const menuItem = menuItemById.get(i.menuItemId);
+      if (!byId.has(i.menuItemId)) throw new HttpError(400, `Unknown or inactive menuItemId ${i.menuItemId} for this location`);
+    }
+
+    const demand = new Map();
+    for (const i of items) demand.set(i.menuItemId, (demand.get(i.menuItemId) || 0) + (i.quantity || 1));
+    const trackedIds = menuItems.filter((m) => m.track_stock).map((m) => m.id);
+    const onHand = await onHandMap(client, trackedIds);
+    for (const id of trackedIds) {
+      if (demand.get(id) > onHand.get(id)) {
+        throw new HttpError(409, `Not enough stock: ${byId.get(id).name} (${onHand.get(id)} left)`);
+      }
+    }
+
+    // The table's running bill, if any. Locked so a payment can't close it while we add to it.
+    const { rows: openRows } = await client.query(
+      `SELECT id FROM orders WHERE table_id = $1 AND location_id = $2 AND status = 'OPEN'
+       ORDER BY opened_at LIMIT 1 FOR UPDATE`,
+      [tableId, locationId]
+    );
+    const isNew = openRows.length === 0;
+    const orderId = isNew ? crypto.randomUUID() : openRows[0].id;
+    if (isNew) {
       await client.query(
-        `INSERT INTO order_items (id, order_id, menu_item_id, quantity, unit_price, tax_rate, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [
-          crypto.randomUUID(),
-          orderId,
-          i.menuItemId,
-          i.quantity || 1,
-          menuItem.price,
-          menuItem.tax_rate,
-          i.notes || null,
-        ]
+        "INSERT INTO orders (id, location_id, table_id, opened_by_id) VALUES ($1, $2, $3, $4)",
+        [orderId, locationId, tableId, req.user.sub]
       );
     }
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
+    const newItemIds = [];
+    for (const i of items) {
+      const m = byId.get(i.menuItemId);
+      const qty = i.quantity || 1;
+      const orderItemId = crypto.randomUUID();
+      await client.query(
+        // clock_timestamp() (not now()) so lines keep the order they were sent
+        // in: now() is identical for every statement in a transaction.
+        // station is copied from the dish so the ticket stays on its screen even if the menu changes later
+        `INSERT INTO order_items (id, order_id, menu_item_id, quantity, unit_price, tax_rate, notes, station, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp(), clock_timestamp())`,
+        [orderItemId, orderId, m.id, qty, m.price, m.tax_rate, i.notes ? i.notes.trim() : null, m.station]
+      );
+      newItemIds.push(orderItemId);
+      if (m.track_stock) {
+        await addMovement(client, {
+          locationId, menuItemId: m.id, delta: -qty, reason: "SALE", orderItemId, userId: req.user.sub,
+        });
+      }
+    }
+
+    const summary = [...demand].map(([id, q]) => `${q}x ${byId.get(id).name}`).join(", ");
+    const ev = await logEvent(client, {
+      locationId, orderId, type: isNew ? "ORDER_CREATED" : "ITEMS_ADDED", actorId: req.user.sub,
+      message: isNew ? `${tableRows[0].label}: new order — ${summary}` : `${tableRows[0].label}: added — ${summary}`,
+      detail: { table: tableRows[0].label },
+    });
+    return {
+      order: await getOrder(client, locationId, orderId),
+      activity: [ev], stockIds: trackedIds, added: !isNew, addedIds: newItemIds,
+    };
+  });
+
+  if (added) {
+    // screens replace their copy of this order and ring only for the new lines
+    emitToLocation(locationId, "order:items-added", { order, addedItemIds: addedIds, addedById: req.user.sub });
+  } else {
+    emitToLocation(locationId, "order:created", order);
   }
-
-  const { rows } = await query(
-    `${OPEN_ORDERS_SQL.replace("o.status = 'OPEN'", "o.id = $2")}`,
-    [req.user.locationId, orderId]
-  );
-  const [order] = groupOrders(rows);
-
-  emitToLocation(req.user.locationId, "order:created", order);
-  res.status(201).json(order);
+  emitActivity(locationId, activity);
+  await emitStock(locationId, stockIds);
+  res.status(added ? 200 : 201).json({ ...order, added });
 });
 
-// PATCH /orders/:orderId/items/:itemId — update a single item's kitchen status.
+// Legal item moves. The only way to CANCEL an item is the supervisor void
+// endpoints below — a plain PATCH can no longer cancel or move backwards.
+const TRANSITIONS = {
+  PENDING: { to: "PREPARING", roles: ROLES.KITCHEN_STATUS },
+  PREPARING: { to: "READY", roles: ROLES.KITCHEN_STATUS },
+  READY: { to: "DELIVERED", roles: ROLES.DELIVER },
+};
+
+// PATCH /orders/:orderId/items/:itemId — advance one item's status.
 router.patch("/:orderId/items/:itemId", async (req, res) => {
-  if (!["KITCHEN", "FOH", "COORDINATOR", "ADMIN"].includes(req.user.role)) {
-    return res.status(403).json({ error: "Requires KITCHEN, FOH, COORDINATOR, or ADMIN" });
-  }
   const { orderId, itemId } = req.params;
   const { status } = req.body || {};
-  const validStatuses = ["PENDING", "PREPARING", "READY", "DELIVERED", "CANCELLED"];
-  if (!validStatuses.includes(status)) {
-    return res.status(400).json({ error: `status must be one of ${validStatuses.join(", ")}` });
+  const locationId = req.user.locationId;
+
+  const result = await withTransaction(async (client) => {
+    const order = await lockOrder(client, locationId, orderId);
+    const { rows } = await client.query(
+      "SELECT * FROM order_items WHERE id = $1 AND order_id = $2 FOR UPDATE",
+      [itemId, orderId]
+    );
+    if (rows.length === 0) throw new HttpError(404, "Order item not found for this location");
+    const item = rows[0];
+
+    if (item.status === status) return { changed: false, order, item }; // double-tap: no-op
+    if (order.status !== "OPEN") throw new HttpError(409, `Order is ${order.status}; items can no longer change`);
+    const rule = TRANSITIONS[item.status];
+    if (!rule || rule.to !== status) {
+      throw new HttpError(409, `Cannot move an item from ${item.status} to ${status}`);
+    }
+    if (!rule.roles.includes(req.user.role)) {
+      throw new HttpError(403, `Requires ${rule.roles.join(", ")} to mark ${status}`);
+    }
+
+    await client.query("UPDATE order_items SET status = $1, updated_at = now() WHERE id = $2", [status, itemId]);
+    const { rows: nameRows } = await client.query("SELECT name FROM menu_items WHERE id = $1", [item.menu_item_id]);
+    const ev = await logEvent(client, {
+      locationId, orderId, type: "ITEM_STATUS", actorId: req.user.sub,
+      message: `${order.table_label}: ${item.quantity}x ${nameRows[0].name} → ${status}`,
+      detail: { table: order.table_label, status },
+    });
+    const fresh = await getOrder(client, locationId, orderId);
+    return { changed: true, order, item: fresh.items.find((i) => i.id === itemId), activity: [ev] };
+  });
+
+  if (!result.changed) {
+    const fresh = await getOrder({ query }, locationId, orderId);
+    return res.json(fresh.items.find((i) => i.id === itemId));
   }
-
-  // Confirm the item belongs to this location before mutating — do not
-  // trust orderId/itemId alone.
-  const { rows: existing } = await query(
-    `SELECT oi.* FROM order_items oi
-     JOIN orders o ON o.id = oi.order_id
-     WHERE oi.id = $1 AND oi.order_id = $2 AND o.location_id = $3`,
-    [itemId, orderId, req.user.locationId]
-  );
-  if (existing.length === 0) return res.status(404).json({ error: "Order item not found for this location" });
-
-  const { rows } = await query(
-    `UPDATE order_items SET status = $1, updated_at = now() WHERE id = $2
-     RETURNING *, (SELECT name FROM menu_items WHERE id = order_items.menu_item_id) AS menu_item_name`,
-    [status, itemId]
-  );
-  const updated = {
-    id: rows[0].id,
-    quantity: rows[0].quantity,
-    unitPrice: rows[0].unit_price,
-    notes: rows[0].notes,
-    status: rows[0].status,
-    menuItem: { id: rows[0].menu_item_id, name: rows[0].menu_item_name },
-  };
-
-  emitToLocation(req.user.locationId, "order-item:updated", { orderId, item: updated });
-  res.json(updated);
+  emitToLocation(locationId, "order-item:updated", {
+    orderId,
+    orderOpenedById: result.order.opened_by_id,
+    tableLabel: result.order.table_label,
+    item: result.item,
+  });
+  emitActivity(locationId, result.activity);
+  res.json(result.item);
 });
 
-// POST /orders/:orderId/close — closes a table's order once everything's delivered.
-router.post("/:orderId/close", async (req, res) => {
-  if (!["FOH", "COORDINATOR", "ADMIN"].includes(req.user.role)) {
-    return res.status(403).json({ error: "Requires FOH, COORDINATOR, or ADMIN" });
+// POST /orders/:orderId/items/:itemId/void — supervisor/admin voids one item
+// on an OPEN order (wrong dish, customer changed mind). Reason is mandatory.
+// Restocks only if the kitchen had not started it (PENDING); food already
+// being cooked is waste, not stock.
+router.post("/:orderId/items/:itemId/void", async (req, res) => {
+  if (!ROLES.VOID.includes(req.user.role)) {
+    return res.status(403).json({ error: `Only ${ROLES.VOID.join(" or ")} can void` });
   }
+  const reason = cleanReason(req.body && req.body.reason);
+  const { orderId, itemId } = req.params;
+  const locationId = req.user.locationId;
+
+  const out = await withTransaction(async (client) => {
+    const order = await lockOrder(client, locationId, orderId);
+    if (order.status === "CLOSED") throw new HttpError(409, "Order is already paid — void the whole sale instead");
+    if (order.status !== "OPEN") throw new HttpError(409, `Order is already ${order.status}`);
+
+    const { rows } = await client.query(
+      `SELECT oi.*, mi.name, mi.track_stock FROM order_items oi
+       JOIN menu_items mi ON mi.id = oi.menu_item_id
+       WHERE oi.id = $1 AND oi.order_id = $2 FOR UPDATE OF oi`,
+      [itemId, orderId]
+    );
+    if (rows.length === 0) throw new HttpError(404, "Order item not found for this location");
+    const item = rows[0];
+    if (item.status === "CANCELLED") throw new HttpError(409, "Item is already voided");
+
+    await client.query(
+      `UPDATE order_items SET status = 'CANCELLED', voided_at = now(), voided_by_id = $1, void_reason = $2,
+       updated_at = now() WHERE id = $3`,
+      [req.user.sub, reason, itemId]
+    );
+    const restocked = item.status === "PENDING" && item.track_stock;
+    if (restocked) {
+      await addMovement(client, {
+        locationId, menuItemId: item.menu_item_id, delta: item.quantity, reason: "VOID_RESTOCK",
+        orderItemId: itemId, note: reason, userId: req.user.sub,
+      });
+    }
+
+    const events = [
+      await logEvent(client, {
+        locationId, orderId, type: "ITEM_VOIDED", actorId: req.user.sub,
+        message: `${order.table_label}: VOIDED ${item.quantity}x ${item.name} — ${reason}`,
+        detail: {
+          table: order.table_label, reason, restocked,
+          amount: Number(item.quantity) * Number(item.unit_price), wasStatus: item.status,
+        },
+      }),
+    ];
+
+    const { rows: left } = await client.query(
+      "SELECT 1 FROM order_items WHERE order_id = $1 AND status <> 'CANCELLED' LIMIT 1",
+      [orderId]
+    );
+    const orderCancelled = left.length === 0;
+    if (orderCancelled) {
+      await client.query(
+        `UPDATE orders SET status = 'CANCELLED', closed_at = now(), voided_at = now(), voided_by_id = $1,
+         void_reason = $2 WHERE id = $3`,
+        [req.user.sub, "All items voided", orderId]
+      );
+    }
+    const fresh = await getOrder(client, locationId, orderId);
+    return {
+      item: fresh.items.find((i) => i.id === itemId),
+      orderCancelled, events, stockIds: restocked ? [item.menu_item_id] : [],
+      tableLabel: order.table_label,
+    };
+  });
+
+  emitToLocation(locationId, "order-item:voided", {
+    orderId, item: out.item, orderCancelled: out.orderCancelled, tableLabel: out.tableLabel,
+  });
+  emitActivity(locationId, out.events);
+  await emitStock(locationId, out.stockIds);
+  res.json({ item: out.item, orderCancelled: out.orderCancelled });
+});
+
+// POST /orders/:orderId/void — supervisor/admin voids a whole order: either
+// an OPEN order (everything not yet voided is cancelled) or an already-PAID
+// order (the payment is marked VOIDED and drops out of sales).
+router.post("/:orderId/void", async (req, res) => {
+  if (!ROLES.VOID.includes(req.user.role)) {
+    return res.status(403).json({ error: `Only ${ROLES.VOID.join(" or ")} can void` });
+  }
+  const reason = cleanReason(req.body && req.body.reason);
   const { orderId } = req.params;
-  const { rows: existing } = await query(
-    "SELECT * FROM orders WHERE id = $1 AND location_id = $2",
-    [orderId, req.user.locationId]
-  );
-  if (existing.length === 0) return res.status(404).json({ error: "Order not found for this location" });
+  const locationId = req.user.locationId;
 
-  const { rows } = await query(
-    "UPDATE orders SET status = 'CLOSED', closed_at = now() WHERE id = $1 RETURNING *",
-    [orderId]
-  );
+  const out = await withTransaction(async (client) => {
+    const order = await lockOrder(client, locationId, orderId);
+    if (order.status === "CANCELLED") throw new HttpError(409, "Order is already voided");
 
-  emitToLocation(req.user.locationId, "order:closed", { orderId });
-  res.json(rows[0]);
+    const stockIds = [];
+    let wasPaid = false;
+    let amount = 0;
+
+    if (order.status === "CLOSED") {
+      const { rows } = await client.query(
+        `UPDATE payments SET status = 'VOIDED', voided_at = now(), voided_by_id = $1, void_reason = $2
+         WHERE order_id = $3 AND status = 'PAID' RETURNING total`,
+        [req.user.sub, reason, orderId]
+      );
+      if (rows.length === 0) throw new HttpError(409, "No active payment found for this order");
+      wasPaid = true;
+      amount = Number(rows[0].total);
+    } else {
+      const { rows: items } = await client.query(
+        `SELECT oi.*, mi.track_stock FROM order_items oi JOIN menu_items mi ON mi.id = oi.menu_item_id
+         WHERE oi.order_id = $1 AND oi.status <> 'CANCELLED' FOR UPDATE OF oi`,
+        [orderId]
+      );
+      for (const it of items) {
+        amount += Number(it.quantity) * Number(it.unit_price);
+        if (it.status === "PENDING" && it.track_stock) {
+          await addMovement(client, {
+            locationId, menuItemId: it.menu_item_id, delta: it.quantity, reason: "VOID_RESTOCK",
+            orderItemId: it.id, note: reason, userId: req.user.sub,
+          });
+          stockIds.push(it.menu_item_id);
+        }
+      }
+      await client.query(
+        `UPDATE order_items SET status = 'CANCELLED', voided_at = now(), voided_by_id = $1, void_reason = $2,
+         updated_at = now() WHERE order_id = $3 AND status <> 'CANCELLED'`,
+        [req.user.sub, reason, orderId]
+      );
+    }
+
+    await client.query(
+      `UPDATE orders SET status = 'CANCELLED', closed_at = COALESCE(closed_at, now()), voided_at = now(),
+       voided_by_id = $1, void_reason = $2 WHERE id = $3`,
+      [req.user.sub, reason, orderId]
+    );
+    const ev = await logEvent(client, {
+      locationId, orderId, type: wasPaid ? "SALE_VOIDED" : "ORDER_VOIDED", actorId: req.user.sub,
+      message: `${order.table_label}: ${wasPaid ? "paid sale" : "order"} VOIDED — ${reason}`,
+      detail: { table: order.table_label, reason, wasPaid, amount },
+    });
+    return { wasPaid, stockIds, events: [ev], tableLabel: order.table_label };
+  });
+
+  emitToLocation(locationId, "order:voided", { orderId, wasPaid: out.wasPaid, tableLabel: out.tableLabel });
+  emitToRoles(locationId, ROLES.OVERSEE, "payment:changed", { orderId });
+  emitActivity(locationId, out.events);
+  await emitStock(locationId, out.stockIds);
+  res.json({ orderId, voided: true, wasPaid: out.wasPaid });
 });
 
 module.exports = router;

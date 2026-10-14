@@ -30,12 +30,13 @@
     {
       "name": "Drinks",
       "sortOrder": 3,
+      "station": "BAR",
       "items": [
-        { "name": "Sample Iced Tea", "price": 10000, "taxRate": 0.1 },
-        { "name": "Sample Iced Coffee", "price": 18000, "taxRate": 0.1 },
-        { "name": "Sample Lemon Tea", "price": 12000, "taxRate": 0.1 },
-        { "name": "Sample Fresh Orange Juice", "price": 20000, "taxRate": 0.1 },
-        { "name": "Sample Mineral Water", "price": 8000, "taxRate": 0.1 }
+        { "name": "Sample Iced Tea", "price": 10000, "taxRate": 0.1, "trackStock": true, "openingStock": 40 },
+        { "name": "Sample Iced Coffee", "price": 18000, "taxRate": 0.1, "trackStock": true, "openingStock": 40 },
+        { "name": "Sample Lemon Tea", "price": 12000, "taxRate": 0.1, "trackStock": true, "openingStock": 40 },
+        { "name": "Sample Fresh Orange Juice", "price": 20000, "taxRate": 0.1, "trackStock": true, "openingStock": 40 },
+        { "name": "Sample Mineral Water", "price": 8000, "taxRate": 0.1, "trackStock": true, "openingStock": 40 }
       ]
     },
     {

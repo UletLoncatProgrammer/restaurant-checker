@@ -4,9 +4,8 @@ name: CI
 # hosted runners have full internet access, so this doesn't hit the
 # binaries.prisma.sh-style network restriction we hit building this locally),
 # applies the schema, seeds sample data, boots the backend, and hits its API.
-# Also builds the frontend. This is a build/smoke-test gate, not a full
-# test suite — there's no automated test framework wired in yet (see
-# ARCHITECTURE.md "Known limitations").
+# Also runs the backend test suite (real Postgres) and the frontend tests,
+# then builds the frontend.
 on:
   push:
     branches: [main]
@@ -42,13 +41,18 @@ jobs:
           node-version: 20
       - name: Install backend deps
         working-directory: backend
-        run: npm install
+        run: npm ci
       - name: Apply schema
         working-directory: backend
         run: node src/migrate.js
       - name: Seed sample data
         working-directory: backend
         run: node src/seed.js
+      - name: Backend tests
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql://restaurant:restaurant@localhost:5432/restaurant_checker
+        run: npm test
       - name: Boot server and smoke-test the API
         working-directory: backend
         run: |
@@ -72,7 +76,10 @@ jobs:
           node-version: 20
       - name: Install frontend deps
         working-directory: frontend
-        run: npm install
+        run: npm ci
+      - name: Test
+        working-directory: frontend
+        run: npm test
       - name: Build
         working-directory: frontend
         run: npm run build

@@ -6,6 +6,11 @@ const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const { pool } = require("./db");
 
+if (process.env.NODE_ENV === "production") {
+  console.error("Refusing to seed demo data (password: password123) in production. Use `npm run provision` instead.");
+  process.exit(1);
+}
+
 async function main() {
   const orgId = crypto.randomUUID();
   await pool.query("INSERT INTO organizations (id, name) VALUES ($1, $2)", [orgId, "Sample Restaurant Group"]);
@@ -36,11 +41,20 @@ async function main() {
       { name: "Es Teh Manis", price: 10000, taxRate: 0.1 },
     ];
     for (const m of menuItems) {
+      const itemId = crypto.randomUUID();
+      const track = m.name === "Es Teh Manis"; // demo of per-item stock tracking
       await pool.query(
-        `INSERT INTO menu_items (id, location_id, category_id, name, price, tax_rate)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [crypto.randomUUID(), locationId, categoryId, m.name, m.price, m.taxRate]
+        `INSERT INTO menu_items (id, location_id, category_id, name, price, tax_rate, track_stock)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [itemId, locationId, categoryId, m.name, m.price, m.taxRate, track]
       );
+      if (track) {
+        await pool.query(
+          `INSERT INTO stock_movements (id, location_id, menu_item_id, delta, reason, note)
+           VALUES ($1, $2, $3, 50, 'OPENING', 'Seed opening stock')`,
+          [crypto.randomUUID(), locationId, itemId]
+        );
+      }
     }
 
     for (const label of ["Table 1", "Table 2", "Table 3", "Table 4"]) {
@@ -56,6 +70,7 @@ async function main() {
       { role: "FOH", label: "FOH Staff" },
       { role: "KITCHEN", label: "Kitchen Staff" },
       { role: "COORDINATOR", label: "Coordinator" },
+      { role: "SUPERVISOR", label: "Supervisor" },
     ];
     for (const s of staff) {
       await pool.query(
@@ -76,8 +91,8 @@ async function main() {
   }
 
   console.log("\nSample logins (password: password123):");
-  console.log("  foh@downtown.example / kitchen@downtown.example / coordinator@downtown.example");
-  console.log("  foh@uptown.example / kitchen@uptown.example / coordinator@uptown.example");
+  console.log("  foh@ / kitchen@ / coordinator@ / supervisor@ downtown.example");
+  console.log("  foh@ / kitchen@ / coordinator@ / supervisor@ uptown.example");
 }
 
 main()

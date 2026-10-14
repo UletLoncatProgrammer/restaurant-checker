@@ -1,0 +1,29 @@
+# The single public front door of the VPS: HTTPS (automatic certificates) and routing
+# of  <company>.yourdomain.com  to that company's own stack. Start once:
+#   docker network create rc_edge
+#   docker compose -f deploy/docker-compose.edge.yml --env-file /srv/rc/rc.conf up -d
+name: rc_edge
+services:
+  caddy:
+    image: docker.io/library/caddy:2-alpine
+    container_name: rc_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${RC_HOME:-/srv/rc}/caddy/sites:/etc/caddy/sites:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+networks:
+  edge:
+    external: true
+    name: rc_edge
+volumes:
+  caddy_data:
+  caddy_config:

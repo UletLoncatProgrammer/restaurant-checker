@@ -57,23 +57,48 @@ async function findOrCreateCategory(locationId, name, sortOrder) {
   return created[0];
 }
 
-async function upsertMenuItem(locationId, categoryId, item) {
+// Where a dish is made: "station" on the item, else on its category, else the hot kitchen.
+const STATIONS = { KITCHEN: "KITCHEN", HOT: "KITCHEN", COLD: "COLD", BAR: "BAR" };
+function stationOf(item, category) {
+  const raw = String(item.station || (category && category.station) || "KITCHEN").toUpperCase();
+  if (!STATIONS[raw]) throw new Error(`Unknown station "${raw}" for ${item.name} (use KITCHEN, COLD or BAR)`);
+  return STATIONS[raw];
+}
+
+async function upsertMenuItem(locationId, categoryId, item, category) {
+  const track = item.trackStock === true;
+  const station = stationOf(item, category);
   const { rows } = await pool.query(
     "SELECT * FROM menu_items WHERE location_id = $1 AND category_id = $2 AND name = $3",
     [locationId, categoryId, item.name]
   );
+  let id;
   if (rows[0]) {
+    id = rows[0].id;
     await pool.query(
-      "UPDATE menu_items SET price = $1, tax_rate = $2, active = true WHERE id = $3",
-      [item.price, item.taxRate ?? 0, rows[0].id]
+      "UPDATE menu_items SET price = $1, tax_rate = $2, active = true, track_stock = $3, station = $5 WHERE id = $4",
+      [item.price, item.taxRate ?? 0, track, id, station]
     );
-    return;
+  } else {
+    id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO menu_items (id, location_id, category_id, name, price, tax_rate, track_stock, station)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, locationId, categoryId, item.name, item.price, item.taxRate ?? 0, track, station]
+    );
   }
-  await pool.query(
-    `INSERT INTO menu_items (id, location_id, category_id, name, price, tax_rate)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [crypto.randomUUID(), locationId, categoryId, item.name, item.price, item.taxRate ?? 0]
-  );
+  // Opening stock is written ONCE (only if this item has no movements yet), so
+  // re-running the import after sales never resets real stock counts.
+  if (track && Number.isInteger(item.openingStock) && item.openingStock > 0) {
+    const { rows: existing } = await pool.query("SELECT 1 FROM stock_movements WHERE menu_item_id = $1 LIMIT 1", [id]);
+    if (existing.length === 0) {
+      await pool.query(
+        `INSERT INTO stock_movements (id, location_id, menu_item_id, delta, reason, note)
+         VALUES ($1, $2, $3, $4, 'OPENING', 'Opening stock from menu import')`,
+        [crypto.randomUUID(), locationId, id, item.openingStock]
+      );
+    }
+  }
 }
 
 async function ensureTable(locationId, label) {
@@ -108,7 +133,7 @@ async function main() {
   for (const cat of data.categories || []) {
     const category = await findOrCreateCategory(location.id, cat.name, cat.sortOrder ?? 0);
     for (const item of cat.items || []) {
-      await upsertMenuItem(location.id, category.id, item);
+      await upsertMenuItem(location.id, category.id, item, cat); // cat.station = default station for its dishes
       itemCount++;
     }
   }

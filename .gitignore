@@ -3,3 +3,5 @@ dist/
 .env
 *.log
 .DS_Store
+# troubleshooting output (contains this laptop's network details)
+onsite/laptop/diagnose-output.txt

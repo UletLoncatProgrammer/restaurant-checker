@@ -1,0 +1,5 @@
+# Keep line endings right when the project goes through Git on Windows
+*.sh   text eol=lf
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+onsite/caddy/Caddyfile text eol=lf

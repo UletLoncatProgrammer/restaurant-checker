@@ -1,96 +1,105 @@
-const express = require("express");
-const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const { query } = require("../db");
-const { signToken } = require("../middleware/auth");
+const { config } = require("../config");
+const { signToken, requireAuth, invalidateUser } = require("../middleware/auth");
+const { passwordProblem } = require("../lib/password");
+const { logAuth } = require("../lib/audit");
+const { createLimiter } = require("../lib/rateLimit");
+const { disconnectUser } = require("../socket");
 
-const router = express.Router();
+const router = require("../lib/asyncRouter")();
 
-// Roles a person can grant themselves via self-service signup. COORDINATOR
-// and ADMIN are deliberately excluded — those see every table, every
-// menu/table edit, and every location's data, so letting anyone self-signup
-// into that role would be a real hole in a multi-tenant system. Those
-// accounts get provisioned separately (seed script or a future admin panel).
-const SELF_SIGNUP_ROLES = ["FOH", "KITCHEN"];
+// There is deliberately NO self-service signup: staff accounts are created by the
+// company's ADMIN (POST /users). An open signup would let anyone who finds the
+// server create a login that can read that company's orders and menu.
 
-// Self-service account creation. Requires picking an existing location
-// (see GET /public/locations) — this does not create organizations or
-// locations, only a staff account within one that already exists.
-router.post("/signup", async (req, res) => {
-  const { name, email, password, locationId, role } = req.body || {};
+const loginLimiter = createLimiter({ windowMs: 10 * 60 * 1000, max: 40, message: "Too many sign-in attempts from this device. Try again in a few minutes." });
+router.loginLimiter = loginLimiter;
 
-  if (!name || !email || !password || !locationId || !role) {
-    return res.status(400).json({ error: "name, email, password, locationId, and role are all required" });
-  }
-  if (password.length < 8) {
-    return res.status(400).json({ error: "Password must be at least 8 characters" });
-  }
-  if (!SELF_SIGNUP_ROLES.includes(role)) {
-    return res.status(400).json({ error: `role must be one of ${SELF_SIGNUP_ROLES.join(", ")}` });
-  }
+// Compared against when the e-mail is unknown, so "no such user" and "wrong
+// password" take the same time.
+const DUMMY_HASH = bcrypt.hashSync("not-a-real-password", 10);
 
-  const { rows: locRows } = await query("SELECT id FROM locations WHERE id = $1", [locationId]);
-  if (locRows.length === 0) {
-    return res.status(400).json({ error: "Unknown location" });
-  }
+const normalizeEmail = (e) => (typeof e === "string" ? e.trim().toLowerCase() : "");
 
-  const { rows: existing } = await query("SELECT id FROM users WHERE email = $1", [email]);
-  if (existing.length > 0) {
-    return res.status(409).json({ error: "An account with this email already exists" });
-  }
+function publicUser(u) {
+  return { id: u.id, name: u.name, email: u.email, role: u.role, locationId: u.location_id };
+}
 
-  const passwordHash = await bcrypt.hash(password, 10);
-  const id = crypto.randomUUID();
-  const { rows } = await query(
-    `INSERT INTO users (id, location_id, name, email, password_hash, role)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [id, locationId, name, email, passwordHash, role]
-  );
-  const user = rows[0];
-
-  const token = signToken({ id: user.id, role: user.role, locationId: user.location_id });
-  res.status(201).json({
-    token,
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      locationId: user.location_id,
-    },
-  });
-});
-
-// Deliberately simple email+password login for v1. No password reset flow,
-// no SSO — add those before handing real staff credentials at scale.
-router.post("/login", async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) {
+router.post("/login", loginLimiter, async (req, res) => {
+  const email = normalizeEmail(req.body && req.body.email);
+  const password = req.body && req.body.password;
+  if (!email || typeof password !== "string" || !password) {
     return res.status(400).json({ error: "email and password are required" });
   }
+  if (password.length > 200 || email.length > 200) return res.status(400).json({ error: "Invalid credentials" });
 
-  const { rows } = await query("SELECT * FROM users WHERE email = $1", [email]);
+  const { rows } = await query("SELECT * FROM users WHERE lower(email) = $1", [email]);
   const user = rows[0];
-  if (!user || !user.active) {
+
+  if (user && user.locked_until && new Date(user.locked_until) > new Date()) {
+    const mins = Math.max(1, Math.ceil((new Date(user.locked_until) - Date.now()) / 60000));
+    await logAuth({ locationId: user.location_id, userId: user.id, type: "LOGIN_BLOCKED", email, ip: req.ip });
+    return res.status(429).json({ error: `Too many failed attempts. Try again in ${mins} minute${mins === 1 ? "" : "s"}.` });
+  }
+
+  const valid = await bcrypt.compare(password, user ? user.password_hash : DUMMY_HASH);
+  if (!user || !user.active || !valid) {
+    if (user) {
+      const fails = user.failed_logins + 1;
+      const lock = fails >= config.loginMaxFailures;
+      await query(
+        `UPDATE users SET failed_logins = $2, locked_until = CASE WHEN $3 THEN now() + ($4 || ' minutes')::interval ELSE locked_until END WHERE id = $1`,
+        [user.id, lock ? 0 : fails, lock, String(config.loginLockMinutes)]
+      );
+      await logAuth({ locationId: user.location_id, userId: user.id, type: lock ? "LOCKED" : "LOGIN_FAIL", email, ip: req.ip });
+    } else {
+      await logAuth({ type: "LOGIN_FAIL", email, ip: req.ip, detail: { unknownEmail: true } });
+    }
     return res.status(401).json({ error: "Invalid credentials" });
   }
 
-  const valid = await bcrypt.compare(password, user.password_hash);
-  if (!valid) {
-    return res.status(401).json({ error: "Invalid credentials" });
-  }
+  await query("UPDATE users SET failed_logins = 0, locked_until = NULL, last_login_at = now() WHERE id = $1", [user.id]);
+  await logAuth({ locationId: user.location_id, userId: user.id, type: "LOGIN_OK", email, ip: req.ip });
+  const token = signToken({ id: user.id, role: user.role, locationId: user.location_id, tokenVersion: user.token_version });
+  res.json({ token, user: publicUser(user), mustChangePassword: user.must_change_password });
+});
 
-  const token = signToken({ id: user.id, role: user.role, locationId: user.location_id });
-  res.json({
-    token,
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      locationId: user.location_id,
-    },
-  });
+// Who am I? Lets an app confirm a saved token is still valid (account active,
+// password not reset) when it starts up.
+router.get("/me", requireAuth, async (req, res) => {
+  const { rows } = await query("SELECT * FROM users WHERE id = $1", [req.user.sub]);
+  res.json({ user: publicUser(rows[0]), mustChangePassword: rows[0].must_change_password });
+});
+
+// Choose a new password (also the only thing a person with a temporary password
+// may do). Signs out every other device by bumping the token version.
+router.post("/change-password", requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof currentPassword !== "string" || typeof newPassword !== "string") {
+    return res.status(400).json({ error: "currentPassword and newPassword are required" });
+  }
+  const { rows } = await query("SELECT * FROM users WHERE id = $1", [req.user.sub]);
+  const user = rows[0];
+  if (!(await bcrypt.compare(currentPassword, user.password_hash))) {
+    await logAuth({ locationId: user.location_id, userId: user.id, type: "LOGIN_FAIL", email: user.email, ip: req.ip, detail: { on: "change-password" } });
+    return res.status(401).json({ error: "Current password is wrong" });
+  }
+  const problem = passwordProblem(newPassword, { email: user.email });
+  if (problem) return res.status(400).json({ error: problem });
+  if (newPassword === currentPassword) return res.status(400).json({ error: "Choose a password different from the current one" });
+
+  const hash = await bcrypt.hash(newPassword, config.bcryptCost);
+  const upd = await query(
+    `UPDATE users SET password_hash = $2, must_change_password = false, token_version = token_version + 1,
+            failed_logins = 0, locked_until = NULL WHERE id = $1 RETURNING token_version`,
+    [user.id, hash]
+  );
+  invalidateUser(user.id);
+  disconnectUser(user.id);
+  await logAuth({ locationId: user.location_id, userId: user.id, type: "PASSWORD_CHANGED", email: user.email, ip: req.ip });
+  const token = signToken({ id: user.id, role: user.role, locationId: user.location_id, tokenVersion: upd.rows[0].token_version });
+  res.json({ token, user: publicUser(user), mustChangePassword: false });
 });
 
 module.exports = router;

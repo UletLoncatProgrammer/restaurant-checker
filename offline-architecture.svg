@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 730" width="1200" height="730" font-family="Calibri, Arial, sans-serif">
+  <defs>
+    <marker id="arrS" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2B2118"/>
+    </marker>
+    <marker id="arrD" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C2553A"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="730" fill="#FFFFFF"/>
+
+  <text x="40" y="44" font-family="Cambria, Georgia, serif" font-size="28" font-weight="700" fill="#2B2118">Offline setup: the server lives inside the restaurant</text>
+  <text x="40" y="70" font-size="15" fill="#5A4A3C">Design proposal, not built yet. Tablets talk to the on-site server over local Wi-Fi. The internet is only for remote access and backups.</text>
+
+  <!-- INSIDE THE RESTAURANT -->
+  <rect x="40" y="90" width="720" height="560" rx="14" fill="#F4F2EF" stroke="#CFC8C0" stroke-width="1.5"/>
+  <text x="64" y="122" font-size="15" font-weight="700" fill="#4F7A64">INSIDE THE RESTAURANT: keeps working with no internet</text>
+
+  <!-- devices -->
+  <g>
+    <rect x="70" y="150" width="200" height="96" rx="10" fill="#FFFFFF" stroke="#CFC8C0"/>
+    <text x="170" y="184" text-anchor="middle" font-size="17" font-weight="700" fill="#2B2118">Waiter tablets</text>
+    <text x="170" y="210" text-anchor="middle" font-size="14" fill="#5A4A3C">take orders,</text>
+    <text x="170" y="228" text-anchor="middle" font-size="14" fill="#5A4A3C">mark delivered</text>
+
+    <rect x="290" y="150" width="200" height="96" rx="10" fill="#FFFFFF" stroke="#CFC8C0"/>
+    <text x="390" y="184" text-anchor="middle" font-size="17" font-weight="700" fill="#2B2118">Kitchen screen</text>
+    <text x="390" y="210" text-anchor="middle" font-size="14" fill="#5A4A3C">sees tickets,</text>
+    <text x="390" y="228" text-anchor="middle" font-size="14" fill="#5A4A3C">marks ready</text>
+
+    <rect x="510" y="150" width="200" height="96" rx="10" fill="#FFFFFF" stroke="#CFC8C0"/>
+    <text x="610" y="184" text-anchor="middle" font-size="17" font-weight="700" fill="#2B2118">Cashier / POS</text>
+    <text x="610" y="210" text-anchor="middle" font-size="14" fill="#5A4A3C">bill, payment,</text>
+    <text x="610" y="228" text-anchor="middle" font-size="14" fill="#5A4A3C">receipt</text>
+  </g>
+
+  <!-- device -> router -->
+  <g stroke="#2B2118" stroke-width="2" fill="none" marker-end="url(#arrS)">
+    <path d="M170,246 L330,308"/>
+    <path d="M390,246 L400,308"/>
+    <path d="M610,246 L470,308"/>
+  </g>
+  <text x="70" y="294" font-size="13" font-style="italic" fill="#5A4A3C">local Wi-Fi, no internet needed</text>
+
+  <!-- router -->
+  <rect x="250" y="310" width="300" height="70" rx="10" fill="#FFFFFF" stroke="#2B2118" stroke-width="2"/>
+  <text x="400" y="340" text-anchor="middle" font-size="17" font-weight="700" fill="#2B2118">Wi-Fi router / switch</text>
+  <text x="400" y="362" text-anchor="middle" font-size="14" fill="#5A4A3C">a local network is enough</text>
+
+  <!-- router -> server -->
+  <path d="M400,380 L400,448" stroke="#2B2118" stroke-width="2" fill="none" marker-end="url(#arrS)"/>
+  <text x="414" y="420" font-size="13" font-style="italic" fill="#5A4A3C">local address, e.g. 192.168.1.50</text>
+
+  <!-- server -->
+  <rect x="190" y="450" width="420" height="150" rx="12" fill="#2B2118"/>
+  <text x="400" y="484" text-anchor="middle" font-family="Cambria, Georgia, serif" font-size="18" font-weight="700" fill="#FFFFFF">On-site server (small mini PC)</text>
+  <text x="400" y="513" text-anchor="middle" font-size="14" fill="#E6DDD2">Restaurant Checker app</text>
+  <text x="400" y="536" text-anchor="middle" font-size="14" fill="#E6DDD2">Database: every order, payment and stock count</text>
+  <text x="400" y="559" text-anchor="middle" font-size="14" fill="#E6DDD2">Battery backup (UPS) for power cuts</text>
+  <text x="400" y="582" text-anchor="middle" font-size="14" fill="#E3A73B">Tailscale on this machine: remote access only</text>
+
+  <!-- legend -->
+  <line x1="70" y1="628" x2="120" y2="628" stroke="#2B2118" stroke-width="2"/>
+  <text x="130" y="633" font-size="13" fill="#2B2118">local network (works offline)</text>
+  <line x1="360" y1="628" x2="410" y2="628" stroke="#C2553A" stroke-width="2" stroke-dasharray="7 5"/>
+  <text x="420" y="633" font-size="13" fill="#2B2118">needs internet (optional)</text>
+
+  <!-- INTERNET SIDE -->
+  <rect x="800" y="90" width="360" height="560" rx="14" fill="#FFFFFF" stroke="#CFC8C0" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="824" y="122" font-size="15" font-weight="700" fill="#C2553A">INTERNET: optional</text>
+
+  <rect x="830" y="150" width="300" height="270" rx="12" fill="#EEF4F0" stroke="#4F7A64" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="850" y="180" font-size="16" font-weight="700" fill="#2F5A47">Tailscale private network</text>
+  <text x="850" y="199" font-size="13" fill="#5A4A3C">remote access only, not used by the tablets</text>
+
+  <rect x="850" y="215" width="260" height="80" rx="10" fill="#FFFFFF" stroke="#CFC8C0"/>
+  <text x="980" y="245" text-anchor="middle" font-size="16" font-weight="700" fill="#2B2118">Owner at home</text>
+  <text x="980" y="268" text-anchor="middle" font-size="14" fill="#5A4A3C">phone or laptop: live</text>
+  <text x="980" y="286" text-anchor="middle" font-size="14" fill="#5A4A3C">dashboard and reports</text>
+
+  <rect x="850" y="315" width="260" height="80" rx="10" fill="#FFFFFF" stroke="#CFC8C0"/>
+  <text x="980" y="345" text-anchor="middle" font-size="16" font-weight="700" fill="#2B2118">You (support)</text>
+  <text x="980" y="368" text-anchor="middle" font-size="14" fill="#5A4A3C">updates, fixes, check</text>
+  <text x="980" y="386" text-anchor="middle" font-size="14" fill="#5A4A3C">that backups ran</text>
+
+  <rect x="830" y="470" width="300" height="100" rx="12" fill="#FFFFFF" stroke="#2B2118" stroke-width="1.5"/>
+  <text x="980" y="505" text-anchor="middle" font-size="17" font-weight="700" fill="#2B2118">Off-site backup</text>
+  <text x="980" y="530" text-anchor="middle" font-size="14" fill="#5A4A3C">nightly copy of the database, so a</text>
+  <text x="980" y="548" text-anchor="middle" font-size="14" fill="#5A4A3C">theft or fire loses nothing</text>
+
+  <!-- server -> tailscale, server -> backup (dashed, need internet) -->
+  <path d="M610,495 H700 V285 H828" stroke="#C2553A" stroke-width="2" stroke-dasharray="7 5" fill="none" marker-end="url(#arrD)"/>
+  <text x="712" y="270" font-size="13" font-style="italic" fill="#C2553A">remote access</text>
+  <path d="M610,550 H828" stroke="#C2553A" stroke-width="2" stroke-dasharray="7 5" fill="none" marker-end="url(#arrD)"/>
+  <text x="640" y="540" font-size="13" font-style="italic" fill="#C2553A">nightly backup</text>
+
+  <!-- note -->
+  <rect x="40" y="668" width="1120" height="46" rx="10" fill="#2B2118"/>
+  <text x="600" y="697" text-anchor="middle" font-size="15" fill="#FFFFFF">If the internet is cut: orders, kitchen and payments keep working. Only remote viewing and backups wait until it returns.</text>
+</svg>

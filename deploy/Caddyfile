@@ -1,0 +1,6 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# Each company adds one file here (written by new-company.sh).
+import /etc/caddy/sites/*.caddy

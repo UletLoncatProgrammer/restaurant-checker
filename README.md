@@ -1,14 +1,17 @@
-# Restaurant Checker — v1 (Order → Kitchen → Coordinator)
+# Restaurant Checker — v2 (Order → Kitchen → POS → Coordinator/Supervisor)
 
 Read `ARCHITECTURE.md` first — it covers what this does and does not do, and the reasoning behind the local-network-first design. This README is just setup steps.
 
 ## What's in this release
 
-- **Order Entry** (front-of-house tablet): pick a table, tap menu items, send to kitchen.
-- **Kitchen Display** (screen in kitchen): replaces the paper ticket, updates live, kitchen staff advance item status.
-- **Coordinator Dashboard**: every open table's status + live "ordered vs. delivered" count per menu item.
+- **Order Entry** (front-of-house tablet): pick a table, tap menu items, send to kitchen; hear/see when food is ready.
+- **Kitchen Display** (screen in kitchen): replaces the paper ticket, updates live, rings on every new order.
+- **POS** (waiters): bill a fully-served table, take cash/card/QRIS/other, print a receipt.
+- **Coordinator Dashboard**: live open tables + outstanding counts, **all transactions** by day, activity feed, stock, and the **Excel report** (sales + stock in one file, daily or weekly).
+- **Supervisor** role: the only role (besides Admin) that can **void** an item, an order, or a paid sale, with a mandatory reason.
+- **Sound alerts**: kitchen on new order; waiters when their food is ready. Right-click / long-press menu is disabled app-wide.
 
-Not included yet: inventory, purchasing, finance/tax, HR. See the roadmap table in `ARCHITECTURE.md`.
+Not included yet: ingredient-level inventory, purchasing, tax filing, HR. (Payments are *recorded*, not processed through a card/QRIS gateway.) See the roadmap table in `ARCHITECTURE.md`.
 
 ## Testing on your actual tablet (same wifi as your computer)
 
@@ -20,7 +23,7 @@ This is the fastest way to see it working on real hardware — no hosting, no Do
 4. Run both servers as in Quick Start below (`npm run dev` in each folder — the frontend's `--host` flag is already set, which is what lets other devices on the network reach it).
 5. **Windows Firewall**: the first time each server starts, Windows will likely prompt to allow it on private networks — click Allow. If the tablet still can't connect, check Windows Defender Firewall settings for Node.js and allow it on "Private" networks.
 6. On the tablet's browser, go to `http://<your-computer's-IP>:5173`. You should see the login screen.
-7. Try it as two different roles at once: sign in as one seeded account (or sign up a new one) on the tablet, and a different account on your computer's browser at the same URL — actions on one show up live on the other, since both are talking to the same backend.
+7. Try it as two different roles at once: sign in as one seeded account on the tablet, and a different account on your computer's browser at the same URL — actions on one show up live on the other, since both are talking to the same backend.
 
 ## Quick start (local development, one machine)
 
@@ -56,39 +59,68 @@ npm install
 npm run dev -- --host       # starts on http://localhost:5173, reachable from other devices on the LAN
 ```
 
-### 4. Log in — or sign up
+### 4. Log in
 
-There's now a self-service signup page at `/signup` (linked from the login screen). It only lets you create **Front-of-house** or **Kitchen** accounts, tied to whichever branch you pick from the list — Coordinator/Admin accounts (full visibility, menu editing) aren't self-service on purpose, see the comment in `backend/src/routes/auth.js` for why.
+There is no self-service sign-up: a company's ADMIN creates staff accounts (Admin screen, or `npm run create-user`). Each new account gets a temporary password and must choose its own at first sign-in.
 
-Or use the sample accounts already seeded (password for all: `password123`):
+For local development, `npm run seed` creates sample accounts (development only; the seed refuses to run in production) (password for all: `password123`):
 
 | Location | Role | Email |
 |---|---|---|
 | Downtown Branch | Front-of-house | foh@downtown.example |
 | Downtown Branch | Kitchen | kitchen@downtown.example |
 | Downtown Branch | Coordinator | coordinator@downtown.example |
+| Downtown Branch | Supervisor | supervisor@downtown.example |
 | Uptown Branch | Front-of-house | foh@uptown.example |
 | Uptown Branch | Kitchen | kitchen@uptown.example |
 | Uptown Branch | Coordinator | coordinator@uptown.example |
+| Uptown Branch | Supervisor | supervisor@uptown.example |
+
+**Upgrading an existing database** (you already ran v1)? Don't re-seed. Run `npm install` then `npm run migrate` in `backend/` (safe to repeat), then create a supervisor:
+
+```bash
+npm run create-user -- --email sup@yourplace.com --name "Dewi" --role SUPERVISOR --location "Downtown Branch"
+```
+
+Leave out `--password` and a random one is generated and printed once. The same command creates COORDINATOR/ADMIN accounts.
 
 Open the app on two browser tabs (or two devices) — log in as `foh@downtown.example` on one, `kitchen@downtown.example` on the other. Send an order from the FOH screen and watch it appear instantly on the Kitchen Display.
 
 **Delete or change these accounts before any real deployment** — they're seeded for demo purposes with a shared known password.
 
-## Deploying to an actual restaurant (recommended: local server on-site)
+## Tablet setup for alerts (read this — sound is the part most likely to disappoint)
 
-1. Get a small always-on machine on the restaurant's LAN (a mini PC or NUC; a Raspberry Pi 4/5 also works for low order volume).
-2. Install Docker on it.
-3. Copy this whole project to that machine.
-4. Edit `docker-compose.yml`: change `JWT_SECRET` to a real random value, and set `CORS_ORIGIN` to the tablets' actual origin once you know it (or leave `*` for LAN-only use where this isn't public-facing).
-5. `docker compose up -d --build`
-6. Build the frontend for production (`cd frontend && npm run build`) and serve the `dist/` folder from any static file server on the same machine (nginx, Caddy, or even `npx serve dist`), or point tablets' browsers at the Vite dev server's LAN IP for a quick pilot.
-7. On each tablet, open the machine's local IP in the browser (e.g. `http://192.168.1.50:5173`) and add it to the home screen so it launches like an app.
-8. **Pilot this on one shift with a supervisor present before relying on it for a real service night.** See "Known limitations" in `ARCHITECTURE.md`.
+A web page cannot make noise while the tablet is asleep or the browser is in the background. For the alerts to be reliable:
 
-## Multi-location note
+1. **iPad:** Settings → Display & Brightness → Auto-Lock → **Never** (kitchen and waiter tablets), keep them charging. Optionally use Guided Access to pin Safari to the app.
+2. Turn the volume up. The sounds use a normal audio player, which on iPad should play even with the silent switch on — but **I could not test that on a real iPad**; check it on yours (tap "Sound: ON" in the top bar to hear a test chime).
+3. After any page reload, tap anywhere once (a red/amber bar reminds you) — browsers forbid sound until someone touches the page.
+4. The coloured banner on screen is the backup when sound isn't heard.
 
-Each location runs its own local server today (this is the local-network-first design — a location's order flow shouldn't depend on another location's uptime or on the internet). If you want a central view across locations (e.g. an owner dashboard showing all branches), that's a phase-2 addition: either a lightweight sync job pushing closed-order summaries to a central cloud database, or a cloud-hosted reporting layer that reads from each location's Postgres on a schedule. Not built in this release — flag it if it's a near-term priority, since it changes how `docker-compose.yml` and networking should be set up now versus later.
+## Excel report
+
+Dashboard → **Report** tab (Coordinator/Admin) → Daily or Weekly → Download Excel. Or directly: `GET /reports/export?period=day|week&date=YYYY-MM-DD` with a bearer token. Sheets: Summary, Sales by day, Sales by item, Transactions, Stock, Voids. Stock only covers items with stock tracking on: add `"trackStock": true, "openingStock": 40` to an item in your menu JSON and re-run `node src/import-menu.js menus/<file>.json` (opening stock is only written the first time, so re-importing never resets real counts). Receive deliveries / correct counts in the dashboard **Stock** tab.
+
+## Tests
+
+```bash
+# backend (needs a Postgres where creating throwaway data is OK)
+cd backend && TEST_DATABASE_URL=postgresql://restaurant:restaurant@localhost:5432/restaurant_checker npm test
+# frontend
+cd frontend && npm test
+```
+
+Backend tests cover the order → kitchen → deliver → pay flow with exact money math, double-pay races, voids and restock rules, permissions per role, tenant isolation, Excel totals reconciling to payments, timezone/week boundaries, socket security, and upgrading a v1 database. Frontend tests cover the alerts (who hears what), POS, dashboard permissions, and right-click blocking.
+
+## Deploying for customers (commercial)
+
+Each customer company gets its **own stack** (own database, secrets and address, e.g. `https://acme.yourdomain.com`) on your VPS, behind one HTTPS front door. The same address also serves the browser version; the Android and Windows apps ask staff for the company code once and then talk to that address.
+
+Everything is in `deploy/`: start with **`deploy/README.md`** (VPS setup, adding a company, backups, updates, app build notes, launch checklist). The security/readiness review is in **`AUDIT.md`**.
+
+Version 1 is **cloud only**: if a restaurant's internet goes down, taking orders stops until it returns. Offline mode and an on-site server option are not built (see `AUDIT.md`).
+
+`docker-compose.yml` in the project root is for development on your own computer only.
 
 ## Version control (GitHub)
 

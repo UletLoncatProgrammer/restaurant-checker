@@ -1,149 +1,362 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
 import { api } from "../lib/api";
 import { getSocket } from "../lib/socket";
+import { rp } from "../lib/money";
+import { useLiveOrders } from "../hooks/useLiveOrders";
+import { useAlerts } from "../hooks/useAlerts";
+import Topbar from "../components/Topbar.jsx";
+import AlertBanner from "../components/AlertBanner.jsx";
+import ReasonDialog from "../components/ReasonDialog.jsx";
 
-// The role you described as "coordinator with full visibility": every open
-// table's status on one board, plus a live per-menu-item outstanding count
-// (ordered minus delivered) so they can see e.g. "8x Nasi Goreng still owed
-// to the floor" without walking around asking.
+const TABS = ["Live", "Transactions", "Activity", "Stock", "Report"];
+
+// One dashboard for the three oversight roles; what you can DO depends on role:
+//   COORDINATOR  see everything, download the Excel report, receive stock
+//   SUPERVISOR   see everything, VOID items / orders / paid sales
+//   ADMIN        all of the above
+// The server enforces every one of these; hiding a button is only convenience.
 export default function CoordinatorDashboard() {
-  const { user, logout } = useAuth();
-  const [orders, setOrders] = useState([]);
-  const [summary, setSummary] = useState([]);
+  const { user } = useAuth();
+  const canVoid = ["SUPERVISOR", "ADMIN"].includes(user.role);
+  const canExport = ["COORDINATOR", "ADMIN"].includes(user.role);
+  const [tab, setTab] = useState("Live");
+  const [voidTarget, setVoidTarget] = useState(null); // { kind, orderId, itemId?, label }
+  const { alerts, push, dismiss } = useAlerts();
 
-  function refreshSummary() {
-    api.getOutstandingSummary().then(setSummary).catch(console.error);
-  }
+  const { orders, reload } = useLiveOrders(user);
+  const [summary, setSummary] = useState([]);
+  const refreshSummary = useCallback(() => api.getOutstandingSummary().then(setSummary).catch(console.error), []);
 
   useEffect(() => {
-    api.getOpenOrders().then(setOrders).catch(console.error);
     refreshSummary();
+    const socket = getSocket();
+    const events = ["order:created", "order-item:updated", "order-item:voided", "order:closed", "order:voided"];
+    events.forEach((e) => socket.on(e, refreshSummary));
+    return () => events.forEach((e) => socket.off(e, refreshSummary));
+  }, [refreshSummary]);
 
-    const socket = getSocket(user.locationId);
+  async function confirmVoid(reason) {
+    const t = voidTarget;
+    if (t.kind === "item") await api.voidItem(t.orderId, t.itemId, reason);
+    else await api.voidOrder(t.orderId, reason);
+    setVoidTarget(null);
+    push(`Voided: ${t.label}`, "void");
+    reload();
+  }
 
-    function handleCreated(order) {
-      setOrders((prev) => [...prev, order]);
-      refreshSummary();
-    }
-    function handleItemUpdated({ orderId, item }) {
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id === orderId ? { ...o, items: o.items.map((i) => (i.id === item.id ? item : i)) } : o
-        )
-      );
-      refreshSummary();
-    }
-    function handleClosed({ orderId }) {
-      setOrders((prev) => prev.filter((o) => o.id !== orderId));
-      refreshSummary();
-    }
+  const visibleTabs = TABS.filter((t) => (t === "Report" ? canExport : true));
 
-    socket.on("order:created", handleCreated);
-    socket.on("order-item:updated", handleItemUpdated);
-    socket.on("order:closed", handleClosed);
+  return (
+    <div>
+      <Topbar title={user.role === "SUPERVISOR" ? "Supervisor" : "Coordinator Dashboard"} />
+      <AlertBanner alerts={alerts} onDismiss={dismiss} />
+      <div className="container">
+        <div className="tabs" role="tablist">
+          {visibleTabs.map((t) => (
+            <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "primary" : ""} onClick={() => setTab(t)}>
+              {t}
+            </button>
+          ))}
+        </div>
 
-    return () => {
-      socket.off("order:created", handleCreated);
-      socket.off("order-item:updated", handleItemUpdated);
-      socket.off("order:closed", handleClosed);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user.locationId]);
+        {tab === "Live" && (
+          <div className="dashboard-columns">
+            <div className="panel">
+              <h2>Open tables</h2>
+              {orders.length === 0 && <p>No open tables.</p>}
+              {orders.map((order) => {
+                const live = order.items.filter((i) => i.status !== "CANCELLED");
+                const delivered = live.filter((i) => i.status === "DELIVERED").length;
+                return (
+                  <div key={order.id} className="order-block">
+                    <div className="order-block-head">
+                      <strong>{order.table.label}</strong>
+                      <span>{delivered}/{live.length} served · opened {new Date(order.openedAt).toLocaleTimeString()}</span>
+                      {canVoid && (
+                        <button className="danger small" onClick={() => setVoidTarget({ kind: "order", orderId: order.id, label: `${order.table.label} (whole order)` })}>
+                          Void order
+                        </button>
+                      )}
+                    </div>
+                    {order.items.map((item) => (
+                      <div key={item.id} className={`cart-row ${item.status === "CANCELLED" ? "voided" : ""}`}>
+                        <span>{item.quantity}x {item.menuItem.name}</span>
+                        <span style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                          <span className={`status-pill status-${item.status}`}>{item.status}</span>
+                          {canVoid && item.status !== "CANCELLED" && (
+                            <button
+                              className="danger small"
+                              onClick={() => setVoidTarget({ kind: "item", orderId: order.id, itemId: item.id, label: `${order.table.label}: ${item.quantity}x ${item.menuItem.name}` })}
+                            >
+                              Void
+                            </button>
+                          )}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="panel">
+              <h2>Outstanding by item</h2>
+              <table>
+                <thead>
+                  <tr><th>Item</th><th>Ordered</th><th>Delivered</th><th>Outstanding</th></tr>
+                </thead>
+                <tbody>
+                  {summary
+                    .filter((row) => row.outstanding > 0)
+                    .sort((a, b) => b.outstanding - a.outstanding)
+                    .map((row) => (
+                      <tr key={row.menuItemId}>
+                        <td>{row.name}</td><td>{row.ordered}</td><td>{row.delivered}</td>
+                        <td className="outstanding-count">{row.outstanding}</td>
+                      </tr>
+                    ))}
+                  {summary.every((row) => row.outstanding === 0) && (
+                    <tr><td colSpan={4}>Nothing outstanding right now.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
 
-  async function closeOrder(orderId) {
+        {tab === "Transactions" && <Transactions user={user} canVoid={canVoid} onVoid={setVoidTarget} />}
+        {tab === "Activity" && <Activity />}
+        {tab === "Stock" && <Stock />}
+        {tab === "Report" && canExport && <Report />}
+      </div>
+
+      {voidTarget && (
+        <ReasonDialog
+          title={`Void ${voidTarget.kind === "sale" ? "paid sale" : voidTarget.kind}`}
+          detail={`${voidTarget.label}. This is logged under your name.`}
+          onConfirm={confirmVoid}
+          onCancel={() => setVoidTarget(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function Transactions({ canVoid, onVoid }) {
+  const [date, setDate] = useState("");
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    api.getTransactions(date || undefined).then((d) => { setData(d); setError(""); }).catch((e) => setError(e.message));
+  }, [date]);
+
+  useEffect(() => {
+    load();
+    const socket = getSocket();
+    socket.on("payment:changed", load);
+    return () => socket.off("payment:changed", load);
+  }, [load]);
+
+  return (
+    <div className="panel">
+      <div className="toolbar">
+        <h2 style={{ margin: 0 }}>Transactions</h2>
+        <label>
+          Date{" "}
+          <input type="date" value={date || data?.date || ""} onChange={(e) => setDate(e.target.value)} />
+        </label>
+      </div>
+      {error && <p className="error-text">{error}</p>}
+      {data && (
+        <>
+          <div className="stat-row">
+            <Stat label="Paid sales" value={data.totals.paidCount} />
+            <Stat label="Net" value={rp(data.totals.subtotal)} />
+            <Stat label="Tax" value={rp(data.totals.tax)} />
+            <Stat label="Gross" value={rp(data.totals.total)} strong />
+            <Stat label="Voided" value={`${data.totals.voidedCount} (${rp(data.totals.voidedTotal)})`} />
+          </div>
+          <table>
+            <thead>
+              <tr><th>#</th><th>Time</th><th>Table</th><th>Items</th><th>Method</th><th>Total</th><th>By</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody>
+              {data.payments.map((p) => (
+                <tr key={p.id} className={p.status === "VOIDED" ? "voided" : ""}>
+                  <td>{p.receiptNo}</td>
+                  <td>{new Date(p.paidAt).toLocaleTimeString()}</td>
+                  <td>{p.tableLabel}</td>
+                  <td>{p.items}</td>
+                  <td>{p.method}</td>
+                  <td>{rp(p.total)}</td>
+                  <td>{p.cashier}</td>
+                  <td>
+                    <span className={`status-pill ${p.status === "PAID" ? "status-READY" : "status-CANCELLED"}`}>{p.status}</span>
+                    {p.status === "VOIDED" && <div style={{ fontSize: "0.8rem" }}>{p.voidReason} — {p.voidedBy}</div>}
+                  </td>
+                  <td>
+                    {canVoid && p.status === "PAID" && (
+                      <button className="danger small" onClick={() => onVoid({ kind: "sale", orderId: p.orderId, label: `Receipt #${p.receiptNo} (${p.tableLabel}, ${rp(p.total)})` })}>
+                        Void sale
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {data.payments.length === 0 && <tr><td colSpan={9}>No transactions on this day.</td></tr>}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, strong }) {
+  return (
+    <div className="stat">
+      <div className="stat-label">{label}</div>
+      <div className="stat-value" style={strong ? { fontWeight: 800 } : undefined}>{value}</div>
+    </div>
+  );
+}
+
+function Activity() {
+  const [events, setEvents] = useState([]);
+  useEffect(() => {
+    api.getActivity().then(setEvents).catch(console.error);
+    const socket = getSocket();
+    const onNew = (e) => setEvents((prev) => (prev.some((x) => x.id === e.id) ? prev : [e, ...prev].slice(0, 200)));
+    socket.on("activity:new", onNew);
+    return () => socket.off("activity:new", onNew);
+  }, []);
+  return (
+    <div className="panel">
+      <h2>Activity (newest first)</h2>
+      <table>
+        <thead><tr><th>Time</th><th>Who</th><th>What</th></tr></thead>
+        <tbody>
+          {events.map((e) => (
+            <tr key={e.id} className={/VOID/.test(e.type) ? "voided-event" : ""}>
+              <td>{new Date(e.createdAt).toLocaleTimeString()}</td>
+              <td>{e.actorName || "—"}</td>
+              <td>{e.message}</td>
+            </tr>
+          ))}
+          {events.length === 0 && <tr><td colSpan={3}>No activity yet.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function Stock() {
+  const [items, setItems] = useState([]);
+  const [form, setForm] = useState({ menuItemId: "", delta: "", reason: "RECEIVE", note: "" });
+  const [msg, setMsg] = useState("");
+
+  const load = useCallback(() => api.getStock().then(setItems).catch((e) => setMsg(e.message)), []);
+  useEffect(() => {
+    load();
+    const socket = getSocket();
+    socket.on("stock:updated", load);
+    return () => socket.off("stock:updated", load);
+  }, [load]);
+
+  async function submit(e) {
+    e.preventDefault();
+    setMsg("");
     try {
-      await api.closeOrder(orderId);
-    } catch (e) {
-      console.error(e);
+      const delta = Number(form.delta);
+      await api.addStockMovement(form.menuItemId, form.reason === "RECEIVE" ? Math.abs(delta) : delta, form.reason, form.note);
+      setForm({ ...form, delta: "", note: "" });
+      setMsg("Saved.");
+      load();
+    } catch (err) {
+      setMsg(err.message);
     }
   }
 
   return (
-    <div>
-      <div className="topbar">
-        <div>Coordinator Dashboard — {user?.name}</div>
-        <button onClick={logout}>Log out</button>
+    <div className="dashboard-columns">
+      <div className="panel">
+        <h2>Tracked stock</h2>
+        <table>
+          <thead><tr><th>Item</th><th>On hand</th></tr></thead>
+          <tbody>
+            {items.map((i) => (
+              <tr key={i.menuItemId}><td>{i.name}</td><td className={i.onHand <= 5 ? "outstanding-count" : ""}>{i.onHand}</td></tr>
+            ))}
+            {items.length === 0 && <tr><td colSpan={2}>No items have stock tracking turned on.</td></tr>}
+          </tbody>
+        </table>
       </div>
-      <div className="container dashboard-columns">
-        <div className="panel">
-          <h2>Open tables</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Table</th>
-                <th>Items</th>
-                <th>Status</th>
-                <th>Opened</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.map((order) => {
-                const total = order.items.reduce((s, i) => s + i.quantity, 0);
-                const delivered = order.items
-                  .filter((i) => i.status === "DELIVERED")
-                  .reduce((s, i) => s + i.quantity, 0);
-                const allDelivered = delivered === total;
-                return (
-                  <tr key={order.id}>
-                    <td>{order.table.label}</td>
-                    <td>
-                      {delivered}/{total} delivered
-                    </td>
-                    <td>
-                      <span className={`status-pill ${allDelivered ? "status-DELIVERED" : "status-PREPARING"}`}>
-                        {allDelivered ? "Complete" : "In progress"}
-                      </span>
-                    </td>
-                    <td>{new Date(order.openedAt).toLocaleTimeString()}</td>
-                    <td>
-                      {allDelivered && <button onClick={() => closeOrder(order.id)}>Close table</button>}
-                    </td>
-                  </tr>
-                );
-              })}
-              {orders.length === 0 && (
-                <tr>
-                  <td colSpan={5}>No open tables.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+      <form className="panel" onSubmit={submit}>
+        <h2>Receive / adjust</h2>
+        <label>Item
+          <select value={form.menuItemId} onChange={(e) => setForm({ ...form, menuItemId: e.target.value })} required style={{ width: "100%" }}>
+            <option value="">Choose…</option>
+            {items.map((i) => <option key={i.menuItemId} value={i.menuItemId}>{i.name}</option>)}
+          </select>
+        </label>
+        <label>Type
+          <select value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} style={{ width: "100%" }}>
+            <option value="RECEIVE">Receive delivery (+)</option>
+            <option value="ADJUST">Adjust count (+/−, note required)</option>
+          </select>
+        </label>
+        <label>Quantity
+          <input type="number" required value={form.delta} onChange={(e) => setForm({ ...form, delta: e.target.value })} style={{ width: "100%" }} />
+        </label>
+        <label>Note
+          <input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} style={{ width: "100%" }} />
+        </label>
+        {msg && <p className={msg === "Saved." ? "" : "error-text"}>{msg}</p>}
+        <button className="primary" type="submit" style={{ width: "100%" }}>Save</button>
+      </form>
+    </div>
+  );
+}
 
-        <div className="panel">
-          <h2>Outstanding by item</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Item</th>
-                <th>Ordered</th>
-                <th>Delivered</th>
-                <th>Outstanding</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summary
-                .filter((row) => row.outstanding > 0)
-                .sort((a, b) => b.outstanding - a.outstanding)
-                .map((row) => (
-                  <tr key={row.menuItemId}>
-                    <td>{row.name}</td>
-                    <td>{row.ordered}</td>
-                    <td>{row.delivered}</td>
-                    <td className="outstanding-count">{row.outstanding}</td>
-                  </tr>
-                ))}
-              {summary.every((row) => row.outstanding === 0) && (
-                <tr>
-                  <td colSpan={4}>Nothing outstanding right now.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+function Report() {
+  const [period, setPeriod] = useState("day");
+  const [date, setDate] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function download() {
+    setBusy(true);
+    setMsg("");
+    try {
+      const name = await api.downloadReport(period, date || undefined);
+      setMsg(`Downloaded ${name}`);
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="panel" style={{ maxWidth: 520 }}>
+      <h2>Excel report (sales + stock in one file)</h2>
+      <p>
+        Sheets: Summary, Sales by day, Sales by item, Transactions, Stock, Voids. Days run midnight to midnight in the
+        restaurant&apos;s timezone; a week is Monday to Sunday.
+      </p>
+      <div className="method-row">
+        <button className={period === "day" ? "primary" : ""} onClick={() => setPeriod("day")}>Daily</button>
+        <button className={period === "week" ? "primary" : ""} onClick={() => setPeriod("week")}>Weekly</button>
       </div>
+      <label style={{ display: "block", marginTop: "1rem" }}>
+        {period === "day" ? "Day" : "Any date in the week"} (leave empty for today)
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ marginLeft: "0.5rem" }} />
+      </label>
+      <button className="primary" onClick={download} disabled={busy} style={{ marginTop: "1rem" }}>
+        {busy ? "Preparing…" : "Download Excel"}
+      </button>
+      {msg && <p className={msg.startsWith("Downloaded") ? "" : "error-text"}>{msg}</p>}
     </div>
   );
 }

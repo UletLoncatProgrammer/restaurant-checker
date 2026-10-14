@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
+import { IS_WRAPPER, clearServerUrl } from "../lib/server";
 
 export default function Login() {
   const { login } = useAuth();
@@ -9,6 +10,7 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const company = localStorage.getItem("companyName");
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -18,7 +20,7 @@ export default function Login() {
       await login(email, password);
       navigate("/");
     } catch (err) {
-      setError(err.message);
+      setError(err instanceof TypeError ? "Cannot reach the server. Check your internet connection." : err.message);
     } finally {
       setLoading(false);
     }
@@ -27,8 +29,8 @@ export default function Login() {
   return (
     <div className="login-screen">
       <form className="login-card" onSubmit={handleSubmit}>
-        <h1>Restaurant Checker</h1>
-        {error && <div className="error-text">{error}</div>}
+        <h1>{company || "Restaurant Checker"}</h1>
+        {error && <div className="error-text" role="alert">{error}</div>}
         <label>
           Email
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoFocus />
@@ -40,9 +42,16 @@ export default function Login() {
         <button type="submit" disabled={loading}>
           {loading ? "Signing in..." : "Sign in"}
         </button>
-        <p style={{ textAlign: "center", marginTop: "1rem", fontSize: "0.9rem" }}>
-          New staff member? <Link to="/signup">Create an account</Link>
+        <p style={{ textAlign: "center", marginTop: "1rem", fontSize: "0.85rem", color: "#6b7280" }}>
+          No account? Ask your manager to create one for you.
         </p>
+        {IS_WRAPPER && (
+          <p style={{ textAlign: "center", fontSize: "0.85rem" }}>
+            <Link to="/connect" onClick={() => { clearServerUrl(); localStorage.removeItem("companyName"); }}>
+              Change company
+            </Link>
+          </p>
+        )}
       </form>
     </div>
   );
